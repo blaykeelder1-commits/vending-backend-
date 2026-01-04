@@ -277,11 +277,11 @@ router.delete('/machines/:id', async (req, res) => {
 router.get('/products', async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, product_name, description, price, image_url, category,
+      `SELECT id, product_name, description, price, image_url,
               is_active, created_at, updated_at
        FROM products
        WHERE vendor_id = $1
-       ORDER BY category, product_name`,
+       ORDER BY product_name`,
       [req.user.id]
     );
 
@@ -310,7 +310,7 @@ router.get('/products/:id', async (req, res) => {
     const { id } = req.params;
 
     const result = await query(
-      `SELECT id, product_name, description, price, image_url, category,
+      `SELECT id, product_name, description, price, image_url,
               is_active, created_at, updated_at
        FROM products
        WHERE id = $1 AND vendor_id = $2`,
@@ -363,10 +363,10 @@ router.post('/products', async (req, res) => {
 
     const result = await query(
       `INSERT INTO products
-       (vendor_id, product_name, description, price, image_url, category, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, true)
-       RETURNING id, product_name, description, price, image_url, category, is_active, created_at, updated_at`,
-      [req.user.id, productName, description || null, price, imageUrl || null, category || null]
+       (vendor_id, product_name, description, price, image_url, is_active)
+       VALUES ($1, $2, $3, $4, $5, true)
+       RETURNING id, product_name, description, price, image_url, is_active, created_at, updated_at`,
+      [req.user.id, productName, description || null, price, imageUrl || null]
     );
 
     res.status(201).json({
@@ -440,10 +440,6 @@ router.put('/products/:id', async (req, res) => {
     if (value.imageUrl !== undefined) {
       updates.push(`image_url = $${paramCount++}`);
       values.push(value.imageUrl || null);
-    }
-    if (value.category !== undefined) {
-      updates.push(`category = $${paramCount++}`);
-      values.push(value.category || null);
     }
     if (value.isActive !== undefined) {
       updates.push(`is_active = $${paramCount++}`);
@@ -535,12 +531,12 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
     }
 
     const result = await query(
-      `SELECT mp.id, mp.machine_id, mp.product_id, mp.stock_quantity, mp.slot_number,
-              p.product_name, p.description, p.price, p.image_url, p.category
+      `SELECT mp.id, mp.machine_id, mp.product_id, mp.current_stock,
+              p.product_name, p.description, p.price, p.image_url
        FROM machine_products mp
        JOIN products p ON mp.product_id = p.id
        WHERE mp.machine_id = $1
-       ORDER BY mp.slot_number`,
+       ORDER BY p.product_name`,
       [machineId]
     );
 
@@ -570,7 +566,6 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
     const schema = Joi.object({
       productId: Joi.number().integer().required(),
       stockQuantity: Joi.number().integer().min(0).required(),
-      slotNumber: Joi.string().max(10).required(),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -607,13 +602,13 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
       });
     }
 
-    const { productId, stockQuantity, slotNumber } = value;
+    const { productId, stockQuantity } = value;
 
     const result = await query(
-      `INSERT INTO machine_products (machine_id, product_id, stock_quantity, slot_number)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO machine_products (machine_id, product_id, current_stock)
+       VALUES ($1, $2, $3)
        RETURNING *`,
-      [machineId, productId, stockQuantity, slotNumber]
+      [machineId, productId, stockQuantity]
     );
 
     res.status(201).json({
@@ -626,7 +621,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
     if (error.message && error.message.includes('unique')) {
       return res.status(409).json({
         success: false,
-        message: 'Product already exists in this slot',
+        message: 'Product already exists in this machine',
       });
     }
     res.status(500).json({
@@ -645,7 +640,6 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     const { machineId, id } = req.params;
     const schema = Joi.object({
       stockQuantity: Joi.number().integer().min(0).optional(),
-      slotNumber: Joi.string().max(10).optional(),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -675,12 +669,8 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     let paramCount = 1;
 
     if (value.stockQuantity !== undefined) {
-      updates.push(`stock_quantity = $${paramCount++}`);
+      updates.push(`current_stock = $${paramCount++}`);
       values.push(value.stockQuantity);
-    }
-    if (value.slotNumber !== undefined) {
-      updates.push(`slot_number = $${paramCount++}`);
-      values.push(value.slotNumber);
     }
 
     if (updates.length === 0) {
