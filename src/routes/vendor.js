@@ -752,4 +752,196 @@ router.delete('/machines/:machineId/inventory/:id', async (req, res) => {
   }
 });
 
+// ========================================
+// DISCOUNT CODES ROUTES
+// ========================================
+
+/**
+ * GET /api/vendor/machines/:machineId/discounts
+ * Get all discount codes for a specific machine
+ */
+router.get('/machines/:machineId/discounts', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vending machine not found',
+      });
+    }
+
+    const result = await query(
+      `SELECT dc.id, dc.machine_id, dc.product_id, dc.code, dc.discount_type,
+              dc.discount_value, dc.max_uses, dc.current_uses, dc.valid_from,
+              dc.valid_until, dc.is_active, dc.created_at,
+              p.product_name, p.price
+       FROM discount_codes dc
+       LEFT JOIN products p ON dc.product_id = p.id
+       WHERE dc.machine_id = $1 AND dc.vendor_id = $2
+       ORDER BY dc.created_at DESC`,
+      [machineId, req.user.id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        discounts: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching discounts:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching discount codes',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/machines/:machineId/discounts
+ * Create a new discount code for a machine
+ */
+router.post('/machines/:machineId/discounts', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const schema = Joi.object({
+      productId: Joi.number().integer().optional().allow(null),
+      code: Joi.string().min(3).max(50).required(),
+      percentOff: Joi.number().min(0).max(100).required(),
+      startsAt: Joi.date().optional(),
+      endsAt: Joi.date().optional(),
+      maxUses: Joi.number().integer().min(1).optional().allow(null),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vending machine not found',
+      });
+    }
+
+    // If productId specified, verify product belongs to vendor
+    if (value.productId) {
+      const productCheck = await query(
+        'SELECT id FROM products WHERE id = $1 AND vendor_id = $2',
+        [value.productId, req.user.id]
+      );
+
+      if (productCheck.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Product not found',
+        });
+      }
+    }
+
+    const { productId, code, percentOff, startsAt, endsAt, maxUses } = value;
+
+    const result = await query(
+      `INSERT INTO discount_codes
+       (vendor_id, machine_id, product_id, code, discount_type, discount_value,
+        valid_from, valid_until, max_uses, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
+       RETURNING *`,
+      [
+        req.user.id,
+        machineId,
+        productId || null,
+        code.toUpperCase(),
+        'percentage',
+        percentOff,
+        startsAt || null,
+        endsAt || null,
+        maxUses || null,
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Discount code created successfully',
+      data: { discount: result.rows[0] },
+    });
+  } catch (error) {
+    console.error('Error creating discount:', error);
+    if (error.message && error.message.includes('unique')) {
+      return res.status(409).json({
+        success: false,
+        message: 'Discount code already exists',
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error creating discount code',
+    });
+  }
+});
+
+/**
+ * DELETE /api/vendor/machines/:machineId/discounts/:discountId
+ * Delete a discount code
+ */
+router.delete('/machines/:machineId/discounts/:discountId', async (req, res) => {
+  try {
+    const { machineId, discountId } = req.params;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vending machine not found',
+      });
+    }
+
+    const result = await query(
+      'DELETE FROM discount_codes WHERE id = $1 AND machine_id = $2 AND vendor_id = $3 RETURNING id',
+      [discountId, machineId, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Discount code not found',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Discount code deleted successfully',
+    });
+  } catch (error) {
+    console.error('Error deleting discount:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting discount code',
+    });
+  }
+});
+
 module.exports = router;
