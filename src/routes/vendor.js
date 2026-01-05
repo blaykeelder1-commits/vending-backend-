@@ -22,7 +22,7 @@ router.get('/machines', async (req, res) => {
   try {
     const result = await query(
       `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
-              google_sheet_id, is_active, created_at, updated_at
+              google_sheet_id, qr_token, is_active, created_at, updated_at
        FROM vending_machines
        WHERE vendor_id = $1
        ORDER BY created_at DESC`,
@@ -53,9 +53,9 @@ router.get('/machines/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await query(
+    let result = await query(
       `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
-              google_sheet_id, is_active, created_at, updated_at
+              google_sheet_id, qr_token, is_active, created_at, updated_at
        FROM vending_machines
        WHERE id = $1 AND vendor_id = $2`,
       [id, req.user.id]
@@ -68,9 +68,24 @@ router.get('/machines/:id', async (req, res) => {
       });
     }
 
+    let machine = result.rows[0];
+
+    // Generate qr_token if missing (lazy generation)
+    if (!machine.qr_token) {
+      await query(
+        `UPDATE vending_machines SET qr_token = gen_random_uuid() WHERE id = $1`,
+        [id]
+      );
+      const updatedResult = await query(
+        `SELECT qr_token FROM vending_machines WHERE id = $1`,
+        [id]
+      );
+      machine.qr_token = updatedResult.rows[0].qr_token;
+    }
+
     res.json({
       success: true,
-      data: { machine: result.rows[0] },
+      data: { machine },
     });
   } catch (error) {
     console.error('Error fetching machine:', error);
