@@ -451,4 +451,41 @@ router.get('/verify', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/public/machines/by-qr/:qr_token
+ * Public endpoint to resolve QR token to machine
+ */
+router.get('/public/machines/by-qr/:qr_token', async (req, res) => {
+  try {
+    const { qr_token } = req.params;
+
+    const result = await query(
+      `SELECT id, machine_name, vendor_id FROM vending_machines WHERE qr_token = $1 AND is_active = true`,
+      [qr_token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found or inactive'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        machineId: result.rows[0].id,
+        machineName: result.rows[0].machine_name,
+        vendorId: result.rows[0].vendor_id
+      }
+    });
+  } catch (err) {
+    console.error('Error resolving QR token:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 module.exports = router;

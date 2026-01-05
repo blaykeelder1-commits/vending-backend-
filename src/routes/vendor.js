@@ -107,8 +107,8 @@ router.post('/machines', async (req, res) => {
     const tempQR = await generateQRCodeData(0); // Temporary
     const result = await query(
       `INSERT INTO vending_machines
-       (vendor_id, machine_name, location, qr_code_data, google_sheet_id, is_active)
-       VALUES ($1, $2, $3, $4, $5, true)
+       (vendor_id, machine_name, location, qr_code_data, google_sheet_id, qr_token, is_active)
+       VALUES ($1, $2, $3, $4, $5, gen_random_uuid(), true)
        RETURNING id`,
       [req.user.id, machineName, location, tempQR.qrData, googleSheetId || null]
     );
@@ -262,6 +262,57 @@ router.delete('/machines/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error deleting vending machine',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:id/qr
+ * Get machine QR token and URL
+ */
+router.get('/machines/:id/qr', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vendorId = req.user.id;
+
+    const result = await query(
+      `SELECT id, qr_token FROM vending_machines WHERE id = $1 AND vendor_id = $2`,
+      [id, vendorId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found'
+      });
+    }
+
+    let machine = result.rows[0];
+
+    // Generate token if missing
+    if (!machine.qr_token) {
+      const updateResult = await query(
+        `UPDATE vending_machines SET qr_token = gen_random_uuid() WHERE id = $1 RETURNING qr_token`,
+        [id]
+      );
+      machine.qr_token = updateResult.rows[0].qr_token;
+    }
+
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const qr_url = `${baseUrl}/customer/machine/${machine.qr_token}`;
+
+    res.json({
+      success: true,
+      data: {
+        qr_token: machine.qr_token,
+        qr_url
+      }
+    });
+  } catch (err) {
+    console.error('Error getting machine QR:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
