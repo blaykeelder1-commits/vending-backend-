@@ -6,6 +6,56 @@ const { verifyCustomerSession } = require('../middleware/auth');
 
 const router = express.Router();
 
+/**
+ * POST /api/customer/set-machine
+ * Set machine session (doesn't require existing session)
+ */
+router.post('/set-machine', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      machineId: Joi.number().integer().required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { machineId } = value;
+
+    // Verify machine exists
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1',
+      [machineId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    // Set machine session
+    req.session.machineId = machineId;
+
+    res.json({
+      success: true,
+      message: 'Machine session set',
+      data: { machineId },
+    });
+  } catch (error) {
+    console.error('Error setting machine:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error setting machine session',
+    });
+  }
+});
+
 // Most routes require customer session (QR-based auth)
 router.use(verifyCustomerSession);
 
