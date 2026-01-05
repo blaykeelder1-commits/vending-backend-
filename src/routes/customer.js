@@ -57,7 +57,7 @@ router.post('/set-machine', async (req, res) => {
 });
 
 // Most routes require customer session (QR-based auth)
-router.use(verifyCustomerSession);
+router.use(protect);
 
 // ========================================
 // POLLS ROUTES
