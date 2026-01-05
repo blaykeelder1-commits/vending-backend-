@@ -20,6 +20,17 @@ const vendorLoginSchema = Joi.object({
   password: Joi.string().required(),
 });
 
+const customerRegisterSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().min(6).required(),
+  fullName: Joi.string().min(2).required(),
+});
+
+const customerLoginSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().required(),
+});
+
 const qrLoginSchema = Joi.object({
   qrData: Joi.string().required(),
 });
@@ -146,8 +157,135 @@ router.post('/vendor/login', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/customer/register
+ * Register a new customer account
+ */
+router.post('/customer/register', async (req, res) => {
+  try {
+    // Validate input
+    const { error, value } = customerRegisterSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { email, password, fullName } = value;
+
+    // Normalize email
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Create customer user
+    const user = await User.createCustomerWithPassword({ email: normalizedEmail, password, fullName });
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Customer registered successfully',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          role: user.role,
+        },
+        token,
+      },
+    });
+  } catch (error) {
+    console.error('Customer registration error:', error);
+    if (error.message === 'Email already exists') {
+      return res.status(409).json({
+        success: false,
+        message: 'Email already registered',
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error registering customer',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/customer/login
+ * Login customer with email and password
+ */
+router.post('/customer/login', async (req, res) => {
+  try {
+    // Validate input
+    const { error, value } = customerLoginSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { email, password } = value;
+
+    // Normalize email
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Find customer user
+    const user = await User.findByEmail(normalizedEmail);
+
+    if (!user || user.role !== 'customer') {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password',
+      });
+    }
+
+    // Verify password
+    const isValidPassword = await User.verifyPassword(password, user.password_hash);
+
+    if (!isValidPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password',
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          role: user.role,
+        },
+        token,
+      },
+    });
+  } catch (error) {
+    console.error('Customer login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error logging in',
+    });
+  }
+});
+
+/**
  * POST /api/auth/customer/qr-login
- * Login customer by scanning QR code
+ * Login customer by scanning QR code (binds authenticated customer to machine)
  */
 router.post('/customer/qr-login', async (req, res) => {
   try {
@@ -161,6 +299,22 @@ router.post('/customer/qr-login', async (req, res) => {
     }
 
     const { qrData } = value;
+
+    // Check if customer is authenticated
+    let customerId = null;
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.role === 'customer') {
+          customerId = decoded.id;
+        }
+      } catch (jwtError) {
+        // Token invalid, create anonymous session
+      }
+    }
 
     // Validate and decrypt QR code
     let qrPayload;
@@ -197,8 +351,9 @@ router.post('/customer/qr-login', async (req, res) => {
       });
     }
 
-    // Create customer session (anonymous for now)
+    // Create customer session (with customerId if authenticated)
     const session = await CustomerSession.create({
+      customerId,
       machineId: machine.id,
       qrCodeScanned: qrData,
       ipAddress: req.ip,
@@ -207,7 +362,7 @@ router.post('/customer/qr-login', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'QR login successful',
+      message: customerId ? 'QR scan successful - machine bound to account' : 'QR login successful',
       data: {
         sessionToken: session.session_token,
         machine: {
@@ -215,6 +370,7 @@ router.post('/customer/qr-login', async (req, res) => {
           name: machine.machine_name,
           location: machine.location,
         },
+        authenticated: !!customerId,
         expiresAt: session.expires_at,
       },
     });

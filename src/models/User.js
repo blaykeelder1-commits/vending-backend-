@@ -32,6 +32,33 @@ class User {
   }
 
   /**
+   * Create a new customer user with password
+   * @param {object} userData - User data
+   * @returns {object} - Created user (without password)
+   */
+  static async createCustomerWithPassword({ email, password, fullName }) {
+    try {
+      // Hash password
+      const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+
+      const result = await query(
+        `INSERT INTO users (email, password_hash, role, full_name)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, email, role, full_name, created_at`,
+        [email, passwordHash, 'customer', fullName]
+      );
+
+      return result.rows[0];
+    } catch (error) {
+      if (error.code === '23505') {
+        // Unique violation
+        throw new Error('Email already exists');
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Create or get customer user
    * @param {object} userData - Customer data (optional)
    * @returns {object} - Customer user
