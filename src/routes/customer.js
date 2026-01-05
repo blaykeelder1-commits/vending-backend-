@@ -413,13 +413,13 @@ router.get('/machine', async (req, res) => {
 
     // Get available products in this machine
     const productsResult = await query(
-      `SELECT mp.id, mp.stock_quantity, mp.slot_number,
+      `SELECT mp.id, mp.current_stock,
               p.id as product_id, p.product_name, p.description, p.price,
-              p.image_url, p.category
+              p.image_url
        FROM machine_products mp
        JOIN products p ON mp.product_id = p.id
        WHERE mp.machine_id = $1 AND p.is_active = true
-       ORDER BY mp.slot_number`,
+       ORDER BY p.product_name`,
       [machineId]
     );
 
@@ -476,6 +476,118 @@ router.get('/profile', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching profile',
+    });
+  }
+});
+
+/**
+ * GET /api/customer/machine/discounts
+ * Get active discount codes for the current machine
+ */
+router.get('/machine/discounts', async (req, res) => {
+  try {
+    const { machineId } = req.session;
+
+    if (!machineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'No machine session found',
+      });
+    }
+
+    const result = await query(
+      `SELECT dc.id, dc.code, dc.discount_type, dc.discount_value,
+              dc.valid_from, dc.valid_until, dc.max_uses, dc.current_uses,
+              p.product_name, p.price
+       FROM discount_codes dc
+       LEFT JOIN products p ON dc.product_id = p.id
+       WHERE dc.machine_id = $1 AND dc.is_active = true
+       AND (dc.valid_from IS NULL OR dc.valid_from <= NOW())
+       AND (dc.valid_until IS NULL OR dc.valid_until >= NOW())
+       ORDER BY dc.created_at DESC`,
+      [machineId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        discounts: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching machine discounts:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching discounts',
+    });
+  }
+});
+
+/**
+ * POST /api/customer/loyalty/submit
+ * Submit loyalty points for current session
+ */
+router.post('/loyalty/submit', async (req, res) => {
+  try {
+    const { machineId } = req.session;
+    const customerId = req.session.customerId || null;
+
+    if (!machineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'No machine session found',
+      });
+    }
+
+    const schema = Joi.object({
+      pointsEarned: Joi.number().integer().min(1).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { pointsEarned } = value;
+
+    // For now, allow anonymous points submission (customerId can be null)
+    // Later this will be tied to registered customers only
+    if (!customerId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Please register to earn loyalty points',
+      });
+    }
+
+    // Upsert loyalty points
+    const result = await query(
+      `INSERT INTO loyalty_points (customer_id, machine_id, points_balance, lifetime_points, points_earned, transaction_type, description)
+       VALUES ($1, $2, $3, $3, $3, 'manual_submission', 'Points submitted via customer portal')
+       ON CONFLICT (customer_id, machine_id)
+       DO UPDATE SET
+         points_balance = loyalty_points.points_balance + $3,
+         lifetime_points = loyalty_points.lifetime_points + $3,
+         updated_at = CURRENT_TIMESTAMP
+       RETURNING id, customer_id, machine_id, points_balance, lifetime_points, updated_at`,
+      [customerId, machineId, pointsEarned]
+    );
+
+    res.json({
+      success: true,
+      message: 'Points submitted successfully',
+      data: {
+        loyalty: result.rows[0],
+      },
+    });
+  } catch (error) {
+    console.error('Error submitting loyalty points:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error submitting points',
     });
   }
 });
