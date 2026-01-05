@@ -3,6 +3,7 @@ const Joi = require('joi');
 const { query } = require('../config/database');
 const { protect, restrictTo } = require('../middleware/auth');
 const { verifyCustomerSession } = require('../middleware/auth');
+const { upload } = require('../middleware/upload');
 
 const router = express.Router();
 
@@ -536,12 +537,12 @@ router.get('/profile', async (req, res) => {
  */
 router.get('/machine/discounts', async (req, res) => {
   try {
-    const { machineId } = req.session;
+    const machineId = req.query.machineId ? parseInt(req.query.machineId) : req.session.machineId;
 
     if (!machineId) {
       return res.status(400).json({
         success: false,
-        message: 'No machine session found',
+        message: 'Machine ID required (session or query param)',
       });
     }
 
@@ -777,6 +778,180 @@ router.post('/discounts/redeem', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error redeeming discount code',
+    });
+  }
+});
+
+/**
+ * POST /api/customer/redemptions/submit
+ * Submit discount redemption with proof of purchase
+ */
+router.post('/redemptions/submit', upload.single('proofImage'), async (req, res) => {
+  try {
+    const customerId = req.session?.customerId || req.user?.id;
+
+    if (!customerId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+      });
+    }
+
+    const schema = Joi.object({
+      machineId: Joi.number().integer().required(),
+      discountId: Joi.number().integer().required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { machineId, discountId } = value;
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Proof of purchase image required',
+      });
+    }
+
+    const proofImageUrl = `/uploads/proofs/${req.file.filename}`;
+
+    // Verify discount exists and is valid
+    const discountResult = await query(
+      `SELECT id, machine_id, code, discount_value, max_uses, current_uses, is_active,
+              valid_from, valid_until
+       FROM discount_codes
+       WHERE id = $1`,
+      [discountId]
+    );
+
+    if (discountResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Discount code not found',
+      });
+    }
+
+    const discount = discountResult.rows[0];
+
+    if (discount.machine_id !== machineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Discount code does not belong to this machine',
+      });
+    }
+
+    if (!discount.is_active) {
+      return res.status(400).json({
+        success: false,
+        message: 'Discount code is no longer active',
+      });
+    }
+
+    if (discount.valid_from && new Date(discount.valid_from) > new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Discount code is not yet valid',
+      });
+    }
+
+    if (discount.valid_until && new Date(discount.valid_until) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Discount code has expired',
+      });
+    }
+
+    if (discount.max_uses && discount.current_uses >= discount.max_uses) {
+      return res.status(400).json({
+        success: false,
+        message: 'Discount code has reached maximum usage',
+      });
+    }
+
+    // Check if already redeemed
+    const existingRedemption = await query(
+      `SELECT id FROM discount_redemptions
+       WHERE discount_code_id = $1 AND customer_id = $2`,
+      [discountId, customerId]
+    );
+
+    if (existingRedemption.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'You have already redeemed this discount',
+      });
+    }
+
+    // MVP: Auto-approve and award points (10 points per redemption)
+    const pointsAwarded = 10;
+    const status = 'approved';
+
+    // Create redemption record
+    await query(
+      `INSERT INTO discount_redemptions
+       (discount_code_id, customer_id, machine_id, proof_image_url, status, points_awarded)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [discountId, customerId, machineId, proofImageUrl, status, pointsAwarded]
+    );
+
+    // Increment current_uses
+    await query(
+      `UPDATE discount_codes SET current_uses = current_uses + 1 WHERE id = $1`,
+      [discountId]
+    );
+
+    // Award loyalty points
+    const loyaltyCheck = await query(
+      `SELECT id, points_balance FROM loyalty_points
+       WHERE customer_id = $1 AND machine_id = $2`,
+      [customerId, machineId]
+    );
+
+    if (loyaltyCheck.rows.length > 0) {
+      await query(
+        `UPDATE loyalty_points
+         SET points_balance = points_balance + $1,
+             lifetime_points = lifetime_points + $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE customer_id = $2 AND machine_id = $3`,
+        [pointsAwarded, customerId, machineId]
+      );
+    } else {
+      await query(
+        `INSERT INTO loyalty_points (customer_id, machine_id, points_balance, lifetime_points)
+         VALUES ($1, $2, $3, $4)`,
+        [customerId, machineId, pointsAwarded, pointsAwarded]
+      );
+    }
+
+    // Get updated loyalty totals
+    const loyaltyTotals = await query(
+      `SELECT SUM(points_balance) as total_points, SUM(lifetime_points) as total_lifetime_points
+       FROM loyalty_points
+       WHERE customer_id = $1`,
+      [customerId]
+    );
+
+    res.json({
+      success: true,
+      message: `Discount redeemed! You earned ${pointsAwarded} points.`,
+      data: {
+        pointsAwarded,
+        totalPoints: parseInt(loyaltyTotals.rows[0]?.total_points || 0),
+        totalLifetimePoints: parseInt(loyaltyTotals.rows[0]?.total_lifetime_points || 0),
+      },
+    });
+  } catch (error) {
+    console.error('Error submitting redemption:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error submitting redemption',
     });
   }
 });
