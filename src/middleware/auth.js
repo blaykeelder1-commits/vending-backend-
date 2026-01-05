@@ -165,6 +165,10 @@ const protect = async (req, res, next) => {
           fullName: result.rows[0].full_name,
           role: result.rows[0].role,
         };
+        // For customer JWT tokens, also populate req.session for compatibility
+        if (result.rows[0].role === 'customer') {
+          req.session = { customerId: result.rows[0].id };
+        }
         return next();
       }
     } catch (jwtError) {
