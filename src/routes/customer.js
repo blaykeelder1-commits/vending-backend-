@@ -504,7 +504,7 @@ router.get('/profile', async (req, res) => {
     }
 
     const result = await query(
-      `SELECT id, email, full_name, phone, created_at
+      `SELECT id, email, full_name, created_at
        FROM users
        WHERE id = $1 AND role = 'customer'`,
       [req.session.customerId]
