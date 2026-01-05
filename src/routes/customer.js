@@ -592,4 +592,143 @@ router.post('/loyalty/submit', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/customer/discounts/redeem
+ * Redeem a discount code
+ */
+router.post('/discounts/redeem', async (req, res) => {
+  try {
+    const { machineId } = req.session;
+    const customerId = req.session.customerId || null;
+
+    if (!machineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'No machine session found',
+      });
+    }
+
+    if (!customerId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Please register to redeem discount codes',
+      });
+    }
+
+    const schema = Joi.object({
+      code: Joi.string().min(3).max(50).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { code } = value;
+
+    // Find discount code
+    const discountResult = await query(
+      `SELECT id, machine_id, discount_type, discount_value, max_uses, current_uses,
+              valid_from, valid_until, is_active
+       FROM discount_codes
+       WHERE code = $1`,
+      [code.toUpperCase()]
+    );
+
+    if (discountResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Discount code not found',
+      });
+    }
+
+    const discount = discountResult.rows[0];
+
+    // Verify belongs to current machine
+    if (discount.machine_id !== machineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'This discount code is not valid for this machine',
+      });
+    }
+
+    // Verify is active
+    if (!discount.is_active) {
+      return res.status(400).json({
+        success: false,
+        message: 'This discount code is no longer active',
+      });
+    }
+
+    // Verify valid_from
+    if (discount.valid_from && new Date(discount.valid_from) > new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'This discount code is not yet valid',
+      });
+    }
+
+    // Verify valid_until
+    if (discount.valid_until && new Date(discount.valid_until) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'This discount code has expired',
+      });
+    }
+
+    // Verify max_uses
+    if (discount.max_uses && discount.current_uses >= discount.max_uses) {
+      return res.status(400).json({
+        success: false,
+        message: 'This discount code has reached its maximum usage limit',
+      });
+    }
+
+    // Check if customer already redeemed this code
+    const redemptionCheck = await query(
+      `SELECT id FROM discount_redemptions
+       WHERE discount_code_id = $1 AND customer_id = $2`,
+      [discount.id, customerId]
+    );
+
+    if (redemptionCheck.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'You have already redeemed this discount code',
+      });
+    }
+
+    // Record redemption
+    await query(
+      `INSERT INTO discount_redemptions (discount_code_id, customer_id, machine_id)
+       VALUES ($1, $2, $3)`,
+      [discount.id, customerId, machineId]
+    );
+
+    // Increment current_uses
+    await query(
+      `UPDATE discount_codes SET current_uses = current_uses + 1 WHERE id = $1`,
+      [discount.id]
+    );
+
+    res.json({
+      success: true,
+      message: `Discount code redeemed! You saved ${discount.discount_value}%`,
+      data: {
+        discountType: discount.discount_type,
+        discountValue: discount.discount_value,
+      },
+    });
+  } catch (error) {
+    console.error('Error redeeming discount:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error redeeming discount code',
+    });
+  }
+});
+
 module.exports = router;
