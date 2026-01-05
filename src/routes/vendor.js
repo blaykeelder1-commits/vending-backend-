@@ -944,4 +944,199 @@ router.delete('/machines/:machineId/discounts/:discountId', async (req, res) => 
   }
 });
 
+// ============================================
+// POLL ROUTES
+// ============================================
+
+/**
+ * POST /api/vendor/machines/:machineId/polls
+ * Create a poll for a machine
+ */
+router.post('/machines/:machineId/polls', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const vendorId = req.user.id;
+
+    const schema = Joi.object({
+      question: Joi.string().min(5).max(500).required(),
+      options: Joi.array().items(
+        Joi.object({
+          text: Joi.string().min(1).max(255).required(),
+          imageUrl: Joi.string().uri().allow('', null).optional(),
+        })
+      ).min(2).max(20).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { question, options } = value;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    // Create poll
+    const pollResult = await query(
+      `INSERT INTO polls (vendor_id, machine_id, poll_question, is_active)
+       VALUES ($1, $2, $3, true)
+       RETURNING id, poll_question, created_at`,
+      [vendorId, machineId, question]
+    );
+
+    const poll = pollResult.rows[0];
+
+    // Create poll options
+    const optionPromises = options.map((option, index) =>
+      query(
+        `INSERT INTO poll_options (poll_id, option_text, image_url, display_order)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, option_text, image_url`,
+        [poll.id, option.text, option.imageUrl || null, index]
+      )
+    );
+
+    const optionResults = await Promise.all(optionPromises);
+    const createdOptions = optionResults.map(r => r.rows[0]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Poll created successfully',
+      data: {
+        poll: {
+          ...poll,
+          options: createdOptions,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error creating poll:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error creating poll',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/polls/:pollId/results
+ * Get aggregated poll results
+ */
+router.get('/polls/:pollId/results', async (req, res) => {
+  try {
+    const { pollId } = req.params;
+    const vendorId = req.user.id;
+
+    // Verify poll belongs to vendor
+    const pollCheck = await query(
+      'SELECT id, poll_question, machine_id, created_at FROM polls WHERE id = $1 AND vendor_id = $2',
+      [pollId, vendorId]
+    );
+
+    if (pollCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Poll not found',
+      });
+    }
+
+    const poll = pollCheck.rows[0];
+
+    // Get results from view
+    const resultsQuery = await query(
+      `SELECT option_id, option_text, image_url, approve_count, deny_count,
+              total_votes, approve_percent
+       FROM poll_results
+       WHERE poll_id = $1
+       ORDER BY approve_percent DESC, total_votes DESC`,
+      [pollId]
+    );
+
+    const totalVotes = resultsQuery.rows.reduce((sum, row) => sum + parseInt(row.total_votes), 0);
+
+    res.json({
+      success: true,
+      data: {
+        poll: {
+          id: poll.id,
+          question: poll.poll_question,
+          machineId: poll.machine_id,
+          createdAt: poll.created_at,
+        },
+        results: resultsQuery.rows,
+        totalVotes,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching poll results:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching poll results',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:machineId/polls
+ * Get all polls for a machine
+ */
+router.get('/machines/:machineId/polls', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const vendorId = req.user.id;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    const pollsResult = await query(
+      `SELECT p.id, p.poll_question, p.is_active, p.created_at,
+              COUNT(DISTINCT pv.id) as total_votes
+       FROM polls p
+       LEFT JOIN poll_votes pv ON p.id = pv.poll_id
+       WHERE p.machine_id = $1
+       GROUP BY p.id
+       ORDER BY p.created_at DESC`,
+      [machineId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        polls: pollsResult.rows,
+        count: pollsResult.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching polls:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching polls',
+    });
+  }
+});
+
 module.exports = router;

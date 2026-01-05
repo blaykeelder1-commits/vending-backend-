@@ -70,58 +70,53 @@ router.use(protect);
  */
 router.get('/polls', async (req, res) => {
   try {
-    const { machineId } = req.session;
+    const customerId = req.session?.customerId || req.user?.id;
+    const machineId = req.session?.machineId || req.query.machineId;
+
+    if (!machineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Machine ID required',
+      });
+    }
 
     const result = await query(
-      `SELECT p.id, p.question, p.is_active, p.created_at, p.expires_at,
-              vm.machine_name, vm.location
+      `SELECT p.id, p.poll_question as question, p.is_active, p.created_at
        FROM polls p
-       JOIN vending_machines vm ON p.machine_id = vm.id
        WHERE p.machine_id = $1 AND p.is_active = true
-       AND (p.expires_at IS NULL OR p.expires_at > NOW())
-       ORDER BY p.created_at DESC`,
+       ORDER BY p.created_at DESC
+       LIMIT 1`,
       [machineId]
     );
 
-    // Get poll options for each poll
-    const pollsWithOptions = await Promise.all(
-      result.rows.map(async (poll) => {
-        const optionsResult = await query(
-          `SELECT po.id, po.option_text, po.product_id, p.product_name, p.image_url,
-                  COUNT(pv.id) as vote_count
-           FROM poll_options po
-           LEFT JOIN products p ON po.product_id = p.id
-           LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id
-           WHERE po.poll_id = $1
-           GROUP BY po.id, po.option_text, po.product_id, p.product_name, p.image_url
-           ORDER BY po.id`,
-          [poll.id]
-        );
+    if (result.rows.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          poll: null,
+          options: [],
+        },
+      });
+    }
 
-        // Check if customer has voted on this poll
-        let hasVoted = false;
-        if (req.session.customerId) {
-          const voteCheck = await query(
-            `SELECT id FROM poll_votes
-             WHERE poll_id = $1 AND customer_id = $2`,
-            [poll.id, req.session.customerId]
-          );
-          hasVoted = voteCheck.rows.length > 0;
-        }
+    const poll = result.rows[0];
 
-        return {
-          ...poll,
-          options: optionsResult.rows,
-          hasVoted,
-        };
-      })
+    // Get poll options with vote status
+    const optionsResult = await query(
+      `SELECT po.id, po.option_text, po.image_url, po.display_order,
+              CASE WHEN pv.id IS NOT NULL THEN pv.vote_type ELSE NULL END as user_vote
+       FROM poll_options po
+       LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id AND pv.customer_id = $2
+       WHERE po.poll_id = $1
+       ORDER BY po.display_order`,
+      [poll.id, customerId]
     );
 
     res.json({
       success: true,
       data: {
-        polls: pollsWithOptions,
-        count: pollsWithOptions.length,
+        poll,
+        options: optionsResult.rows,
       },
     });
   } catch (error) {
@@ -135,13 +130,23 @@ router.get('/polls', async (req, res) => {
 
 /**
  * POST /api/customer/polls/:pollId/vote
- * Vote on a poll
+ * Vote on a poll option (swipe-style: approve or deny)
  */
 router.post('/polls/:pollId/vote', async (req, res) => {
   try {
     const { pollId } = req.params;
+    const customerId = req.session?.customerId || req.user?.id;
+
+    if (!customerId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required to vote',
+      });
+    }
+
     const schema = Joi.object({
-      pollOptionId: Joi.number().integer().required(),
+      optionId: Joi.number().integer().required(),
+      voteType: Joi.string().valid('like', 'dislike').required(),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -152,79 +157,56 @@ router.post('/polls/:pollId/vote', async (req, res) => {
       });
     }
 
-    const { pollOptionId } = value;
+    const { optionId, voteType } = value;
 
-    // Verify poll exists and is active
-    const pollCheck = await query(
-      `SELECT id, machine_id, is_active, expires_at
-       FROM polls
-       WHERE id = $1`,
-      [pollId]
+    // Verify poll option exists and belongs to poll
+    const optionCheck = await query(
+      `SELECT po.id, po.poll_id, p.is_active
+       FROM poll_options po
+       JOIN polls p ON po.poll_id = p.id
+       WHERE po.id = $1 AND po.poll_id = $2`,
+      [optionId, pollId]
     );
 
-    if (pollCheck.rows.length === 0) {
+    if (optionCheck.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Poll not found',
+        message: 'Poll option not found',
       });
     }
 
-    const poll = pollCheck.rows[0];
+    const option = optionCheck.rows[0];
 
-    if (!poll.is_active) {
+    if (!option.is_active) {
       return res.status(400).json({
         success: false,
         message: 'This poll is no longer active',
       });
     }
 
-    if (poll.expires_at && new Date(poll.expires_at) < new Date()) {
-      return res.status(400).json({
-        success: false,
-        message: 'This poll has expired',
-      });
-    }
-
-    // Verify poll option belongs to this poll
-    const optionCheck = await query(
-      'SELECT id FROM poll_options WHERE id = $1 AND poll_id = $2',
-      [pollOptionId, pollId]
+    // Check if already voted on this option
+    const existingVote = await query(
+      'SELECT id FROM poll_votes WHERE poll_option_id = $1 AND customer_id = $2',
+      [optionId, customerId]
     );
 
-    if (optionCheck.rows.length === 0) {
+    if (existingVote.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid poll option',
+        message: 'You have already voted on this option',
       });
     }
 
-    // Check if customer already voted (if they're registered)
-    if (req.session.customerId) {
-      const existingVote = await query(
-        'SELECT id FROM poll_votes WHERE poll_id = $1 AND customer_id = $2',
-        [pollId, req.session.customerId]
-      );
-
-      if (existingVote.rows.length > 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'You have already voted on this poll',
-        });
-      }
-    }
-
-    // Record the vote
-    const voteResult = await query(
-      `INSERT INTO poll_votes (poll_id, poll_option_id, customer_id, session_id)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, created_at`,
-      [pollId, pollOptionId, req.session.customerId || null, req.session.id]
+    // Record vote
+    await query(
+      `INSERT INTO poll_votes (poll_id, poll_option_id, customer_id, vote_type)
+       VALUES ($1, $2, $3, $4)`,
+      [pollId, optionId, customerId, voteType]
     );
 
     res.json({
       success: true,
       message: 'Vote recorded successfully',
-      data: { vote: voteResult.rows[0] },
     });
   } catch (error) {
     console.error('Error voting on poll:', error);
