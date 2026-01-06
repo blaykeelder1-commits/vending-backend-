@@ -62,9 +62,28 @@ app.get('/api/health', async (req, res) => {
   const { pool } = require('./config/database');
 
   let dbStatus = 'disconnected';
+  let dbFingerprint = null;
+  let machinesCount = 0;
+
   try {
     await pool.query('SELECT NOW()');
     dbStatus = 'connected';
+
+    // Get DB fingerprint
+    const dbUrlParsed = new URL(process.env.DATABASE_URL || '');
+    const hostParts = dbUrlParsed.hostname.split('.');
+    const maskedHost = hostParts.length > 2
+      ? `${hostParts[0].substring(0, 3)}***.${hostParts[hostParts.length - 2]}.${hostParts[hostParts.length - 1]}`
+      : dbUrlParsed.hostname.substring(0, 10) + '***';
+
+    dbFingerprint = {
+      host: maskedHost,
+      database: dbUrlParsed.pathname.substring(1) || 'unknown'
+    };
+
+    // Get machines count
+    const countResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
+    machinesCount = parseInt(countResult.rows[0].count);
   } catch (error) {
     dbStatus = 'error: ' + error.message;
   }
@@ -83,9 +102,47 @@ app.get('/api/health', async (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     database: dbStatus,
+    database_fingerprint: dbFingerprint,
+    machines_count: machinesCount,
     environment_variables: envStatus,
     environment: process.env.NODE_ENV || 'development',
   });
+});
+
+// Admin DB info endpoint (protected)
+app.get('/api/admin/db-info', async (req, res) => {
+  const { pool } = require('./config/database');
+
+  try {
+    // Quick inline auth check
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'No token provided' });
+    }
+
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'vendor') {
+      return res.status(403).json({ success: false, message: 'Vendor access required' });
+    }
+
+    const machinesResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
+    const vendorsResult = await pool.query('SELECT COUNT(*) as count FROM users WHERE role = $1', ['vendor']);
+    const lastMachineResult = await pool.query(
+      'SELECT created_at FROM vending_machines ORDER BY created_at DESC LIMIT 1'
+    );
+
+    res.json({
+      success: true,
+      data: {
+        machines_count: parseInt(machinesResult.rows[0].count),
+        vendors_count: parseInt(vendorsResult.rows[0].count),
+        last_machine_created_at: lastMachineResult.rows[0]?.created_at || null,
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 // API routes
