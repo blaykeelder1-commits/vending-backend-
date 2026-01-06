@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node src/database/migrate-and-start.js",
     "dev": "nodemon src/server.js",
     "migrate": "node src/database/runMigrations.js",
     "test": "echo \"Error: no test specified\" && exit 1"
