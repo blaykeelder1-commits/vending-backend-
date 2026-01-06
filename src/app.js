@@ -69,11 +69,21 @@ app.get('/api/health', async (req, res) => {
     dbStatus = 'error: ' + error.message;
   }
 
+  const requiredEnvVars = [
+    'FRONTEND_URL',
+    'JWT_SECRET',
+    'DATABASE_URL',
+  ];
+
+  const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  const envStatus = missingEnvVars.length === 0 ? 'ok' : 'missing: ' + missingEnvVars.join(', ');
+
   res.status(200).json({
-    status: 'ok',
+    status: dbStatus === 'connected' && missingEnvVars.length === 0 ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     database: dbStatus,
+    environment_variables: envStatus,
     environment: process.env.NODE_ENV || 'development',
   });
 });
