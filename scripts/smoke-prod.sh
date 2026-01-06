@@ -3,7 +3,7 @@ set -e
 
 API_URL="${1:-https://vending-backend-nk0m.onrender.com/api}"
 TEST_EMAIL="smoke-test-vendor@example.com"
-TEST_PASSWORD="SmokeTest123!"
+TEST_PASSWORD="SmokeTest123"
 
 echo "=== Production Smoke Test ==="
 echo "API: $API_URL"
