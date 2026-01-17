@@ -93,8 +93,10 @@ app.use('/uploads', express.static('uploads'));
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   const { pool } = require('./config/database');
+  const { cache } = require('./config/redis');
 
   let dbStatus = 'disconnected';
+  let redisStatus = cache.isEnabled() ? 'enabled' : 'disabled';
   let dbFingerprint = null;
   let machinesCount = 0;
 
@@ -136,6 +138,7 @@ app.get('/api/health', async (req, res) => {
     uptime: process.uptime(),
     database: dbStatus,
     database_fingerprint: dbFingerprint,
+    redis: redisStatus,
     machines_count: machinesCount,
     environment_variables: envStatus,
     environment: process.env.NODE_ENV || 'development',
