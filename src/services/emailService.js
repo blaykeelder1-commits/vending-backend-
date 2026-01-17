@@ -10,7 +10,9 @@ if (process.env.RESEND_API_KEY) {
   console.log('Resend email service disabled (no API key provided)');
 }
 
-const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'IDDI <noreply@iddi.app>';
+// Use Resend's onboarding email until a custom domain is verified
+// To use your own domain, verify it at https://resend.com/domains and set RESEND_FROM_EMAIL
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'IDDI <onboarding@resend.dev>';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vending-front-end.vercel.app';
 
 // Email Templates
