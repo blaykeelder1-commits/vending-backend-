@@ -28,8 +28,9 @@ const cache = {
   async set(key, value, ttlSeconds = 300) {
     if (!redis) return false;
     try {
-      // @upstash/redis handles JSON serialization automatically
-      await redis.set(key, value, { ex: ttlSeconds });
+      // Stringify objects for storage
+      const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+      await redis.set(key, serialized, { ex: ttlSeconds });
       return true;
     } catch (error) {
       console.error('Redis SET error:', error.message);

@@ -153,9 +153,11 @@ app.get('/api/stats', async (req, res) => {
     const cachedStats = await cache.get(cacheKey);
 
     if (cachedStats) {
+      // Parse the cached JSON string
+      const parsedStats = typeof cachedStats === 'string' ? JSON.parse(cachedStats) : cachedStats;
       return res.json({
         success: true,
-        data: cachedStats,
+        data: parsedStats,
         cached: true,
       });
     }
