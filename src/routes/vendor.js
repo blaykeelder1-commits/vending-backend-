@@ -1,6 +1,6 @@
 const express = require('express');
 const Joi = require('joi');
-const { query } = require('../config/database');
+const { query, transaction } = require('../config/database');
 const { protect, restrictTo } = require('../middleware/auth');
 const { generateQRCodeData, generateQRCodeDataURL } = require('../services/qrCodeService');
 
@@ -21,11 +21,16 @@ router.use(restrictTo('vendor'));
 router.get('/machines', async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
-              google_sheet_id, qr_token, is_active, created_at, updated_at
-       FROM vending_machines
-       WHERE vendor_id = $1
-       ORDER BY created_at DESC`,
+      `SELECT vm.id, vm.machine_name, vm.location, vm.qr_code_data, vm.qr_code_image_url,
+              vm.google_sheet_id, vm.qr_token, vm.is_active, vm.created_at, vm.updated_at,
+              COUNT(mp.id) as product_count,
+              COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as performing_count,
+              COUNT(CASE WHEN mp.is_performing = false THEN 1 END) as not_performing_count
+       FROM vending_machines vm
+       LEFT JOIN machine_products mp ON vm.id = mp.machine_id
+       WHERE vm.vendor_id = $1
+       GROUP BY vm.id
+       ORDER BY vm.created_at DESC`,
       [req.user.id]
     );
 
@@ -55,7 +60,7 @@ router.get('/machines/:id', async (req, res) => {
 
     let result = await query(
       `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
-              google_sheet_id, qr_token, is_active, created_at, updated_at
+              google_sheet_id, qr_token, is_active, notes, created_at, updated_at
        FROM vending_machines
        WHERE id = $1 AND vendor_id = $2`,
       [id, req.user.id]
@@ -70,17 +75,24 @@ router.get('/machines/:id', async (req, res) => {
 
     let machine = result.rows[0];
 
-    // Generate qr_token if missing (lazy generation)
+    // Generate qr_token if missing (lazy generation with row-level lock to prevent race condition)
     if (!machine.qr_token) {
-      await query(
-        `UPDATE vending_machines SET qr_token = gen_random_uuid() WHERE id = $1`,
-        [id]
-      );
-      const updatedResult = await query(
-        `SELECT qr_token FROM vending_machines WHERE id = $1`,
-        [id]
-      );
-      machine.qr_token = updatedResult.rows[0].qr_token;
+      const tokenResult = await transaction(async (client) => {
+        // Lock the row to prevent concurrent updates
+        const locked = await client.query(
+          `SELECT qr_token FROM vending_machines WHERE id = $1 FOR UPDATE`,
+          [id]
+        );
+        // Double-check after acquiring lock (another request may have updated it)
+        if (!locked.rows[0].qr_token) {
+          await client.query(
+            `UPDATE vending_machines SET qr_token = gen_random_uuid() WHERE id = $1`,
+            [id]
+          );
+        }
+        return client.query(`SELECT qr_token FROM vending_machines WHERE id = $1`, [id]);
+      });
+      machine.qr_token = tokenResult.rows[0].qr_token;
     }
 
     res.json({
@@ -118,38 +130,41 @@ router.post('/machines', async (req, res) => {
 
     const { machineName, location, googleSheetId } = value;
 
-    // First insert to get the machine ID
-    const tempQR = await generateQRCodeData(0); // Temporary
-    const result = await query(
-      `INSERT INTO vending_machines
-       (vendor_id, machine_name, location, qr_code_data, google_sheet_id, qr_token, is_active)
-       VALUES ($1, $2, $3, $4, $5, gen_random_uuid(), true)
-       RETURNING id`,
-      [req.user.id, machineName, location, tempQR.qrData, googleSheetId || null]
-    );
+    // Use transaction to ensure atomic machine creation with QR code
+    const finalResult = await transaction(async (client) => {
+      // First insert to get the machine ID
+      const tempQR = await generateQRCodeData(0); // Temporary
+      const result = await client.query(
+        `INSERT INTO vending_machines
+         (vendor_id, machine_name, location, qr_code_data, google_sheet_id, qr_token, is_active)
+         VALUES ($1, $2, $3, $4, $5, gen_random_uuid(), true)
+         RETURNING id`,
+        [req.user.id, machineName, location, tempQR.qrData, googleSheetId || null]
+      );
 
-    const machineId = result.rows[0].id;
+      const machineId = result.rows[0].id;
 
-    // Generate proper QR code with actual machine ID
-    const qrCode = await generateQRCodeData(machineId);
-    const qrImageUrl = await generateQRCodeDataURL(qrCode.qrData);
+      // Generate proper QR code with actual machine ID
+      const qrCode = await generateQRCodeData(machineId);
+      const qrImageUrl = await generateQRCodeDataURL(qrCode.qrData);
 
-    // Update with correct QR code
-    await query(
-      `UPDATE vending_machines
-       SET qr_code_data = $1, qr_code_image_url = $2
-       WHERE id = $3`,
-      [qrCode.qrData, qrImageUrl, machineId]
-    );
+      // Update with correct QR code
+      await client.query(
+        `UPDATE vending_machines
+         SET qr_code_data = $1, qr_code_image_url = $2
+         WHERE id = $3`,
+        [qrCode.qrData, qrImageUrl, machineId]
+      );
 
-    // Fetch the complete machine data
-    const finalResult = await query(
-      `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
-              google_sheet_id, is_active, created_at, updated_at
-       FROM vending_machines
-       WHERE id = $1`,
-      [machineId]
-    );
+      // Fetch the complete machine data
+      return client.query(
+        `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
+                google_sheet_id, is_active, created_at, updated_at
+         FROM vending_machines
+         WHERE id = $1`,
+        [machineId]
+      );
+    });
 
     res.status(201).json({
       success: true,
@@ -343,7 +358,7 @@ router.get('/machines/:id/qr', async (req, res) => {
 router.get('/products', async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, product_name, description, price, image_url,
+      `SELECT id, product_name, description, price, image_url, category,
               is_active, created_at, updated_at
        FROM products
        WHERE vendor_id = $1
@@ -376,7 +391,7 @@ router.get('/products/:id', async (req, res) => {
     const { id } = req.params;
 
     const result = await query(
-      `SELECT id, product_name, description, price, image_url,
+      `SELECT id, product_name, description, price, image_url, category,
               is_active, created_at, updated_at
        FROM products
        WHERE id = $1 AND vendor_id = $2`,
@@ -429,10 +444,10 @@ router.post('/products', async (req, res) => {
 
     const result = await query(
       `INSERT INTO products
-       (vendor_id, product_name, description, price, image_url, is_active)
-       VALUES ($1, $2, $3, $4, $5, true)
-       RETURNING id, product_name, description, price, image_url, is_active, created_at, updated_at`,
-      [req.user.id, productName, description || null, price, imageUrl || null]
+       (vendor_id, product_name, description, price, image_url, category, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, true)
+       RETURNING id, product_name, description, price, image_url, category, is_active, created_at, updated_at`,
+      [req.user.id, productName, description || null, price, imageUrl || null, category || null]
     );
 
     res.status(201).json({
@@ -507,6 +522,10 @@ router.put('/products/:id', async (req, res) => {
       updates.push(`image_url = $${paramCount++}`);
       values.push(value.imageUrl || null);
     }
+    if (value.category !== undefined) {
+      updates.push(`category = $${paramCount++}`);
+      values.push(value.category || null);
+    }
     if (value.isActive !== undefined) {
       updates.push(`is_active = $${paramCount++}`);
       values.push(value.isActive);
@@ -572,12 +591,12 @@ router.delete('/products/:id', async (req, res) => {
 });
 
 // ========================================
-// MACHINE INVENTORY (MACHINE PRODUCTS) ROUTES
+// MACHINE INVENTORY (PLANOGRAM) ROUTES
 // ========================================
 
 /**
  * GET /api/vendor/machines/:machineId/inventory
- * Get all products for a specific machine
+ * Get all products for a specific machine with performance status
  */
 router.get('/machines/:machineId/inventory', async (req, res) => {
   try {
@@ -585,7 +604,7 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
 
     // Verify machine belongs to vendor
     const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      'SELECT id, machine_name FROM vending_machines WHERE id = $1 AND vendor_id = $2',
       [machineId, req.user.id]
     );
 
@@ -598,7 +617,9 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
 
     const result = await query(
       `SELECT mp.id, mp.machine_id, mp.product_id, mp.current_stock,
-              p.product_name, p.description, p.price, p.image_url
+              mp.is_performing, mp.performance_marked_at, mp.expiration_date,
+              mp.expiration_date - CURRENT_DATE as days_until_expiration,
+              p.product_name, p.description, p.price, p.image_url, p.category
        FROM machine_products mp
        JOIN products p ON mp.product_id = p.id
        WHERE mp.machine_id = $1
@@ -606,10 +627,25 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
       [machineId]
     );
 
+    // Calculate stats including expiration info
+    const expiringProducts = result.rows.filter(r =>
+      r.expiration_date && r.days_until_expiration <= 7
+    );
+
+    const stats = {
+      total: result.rows.length,
+      performing: result.rows.filter(r => r.is_performing === true).length,
+      notPerforming: result.rows.filter(r => r.is_performing === false).length,
+      unmarked: result.rows.filter(r => r.is_performing === null).length,
+      expiringSoon: expiringProducts.length,
+    };
+
     res.json({
       success: true,
       data: {
+        machine: machineCheck.rows[0],
         inventory: result.rows,
+        stats,
         count: result.rows.length,
       },
     });
@@ -652,6 +688,19 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'Vending machine not found',
+      });
+    }
+
+    // Check inventory limit (40 products max)
+    const countCheck = await query(
+      'SELECT COUNT(*) as count FROM machine_products WHERE machine_id = $1',
+      [machineId]
+    );
+
+    if (parseInt(countCheck.rows[0].count) >= 40) {
+      return res.status(400).json({
+        success: false,
+        message: 'Machine inventory limit reached (40 products max)',
       });
     }
 
@@ -699,7 +748,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
 
 /**
  * PUT /api/vendor/machines/:machineId/inventory/:id
- * Update machine inventory item
+ * Update machine inventory item (stock quantity)
  */
 router.put('/machines/:machineId/inventory/:id', async (req, res) => {
   try {
@@ -773,6 +822,78 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
 });
 
 /**
+ * PUT /api/vendor/machines/:machineId/inventory/:id/performance
+ * Set product performance status (Yes/No)
+ */
+router.put('/machines/:machineId/inventory/:id/performance', async (req, res) => {
+  try {
+    const { machineId, id } = req.params;
+    const schema = Joi.object({
+      isPerforming: Joi.boolean().required(),
+      notes: Joi.string().max(500).optional(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vending machine not found',
+      });
+    }
+
+    const { isPerforming, notes } = value;
+
+    // Update performance status
+    const result = await query(
+      `UPDATE machine_products
+       SET is_performing = $1, performance_marked_at = CURRENT_TIMESTAMP
+       WHERE id = $2 AND machine_id = $3
+       RETURNING *`,
+      [isPerforming, id, machineId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Inventory item not found',
+      });
+    }
+
+    // Log the performance change
+    await query(
+      `INSERT INTO product_performance_log (machine_product_id, is_performing, marked_by, notes)
+       VALUES ($1, $2, $3, $4)`,
+      [id, isPerforming, req.user.id, notes || null]
+    );
+
+    res.json({
+      success: true,
+      message: isPerforming ? 'Product marked as performing well' : 'Product marked as not performing',
+      data: { inventoryItem: result.rows[0] },
+    });
+  } catch (error) {
+    console.error('Error updating performance:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating performance status',
+    });
+  }
+});
+
+/**
  * DELETE /api/vendor/machines/:machineId/inventory/:id
  * Remove a product from machine inventory
  */
@@ -819,204 +940,287 @@ router.delete('/machines/:machineId/inventory/:id', async (req, res) => {
 });
 
 // ========================================
-// DISCOUNT CODES ROUTES
+// PERFORMANCE COMPARISON ROUTES
 // ========================================
 
 /**
- * GET /api/vendor/machines/:machineId/discounts
- * Get all discount codes for a specific machine
+ * GET /api/vendor/performance-comparison
+ * Get performance comparison for a product across all vendor's machines
  */
-router.get('/machines/:machineId/discounts', async (req, res) => {
+router.get('/performance-comparison', async (req, res) => {
   try {
-    const { machineId } = req.params;
+    const { productId } = req.query;
 
-    // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
+    if (!productId) {
+      return res.status(400).json({
         success: false,
-        message: 'Vending machine not found',
+        message: 'productId query parameter required',
       });
     }
 
+    // Verify product belongs to vendor
+    const productCheck = await query(
+      'SELECT id, product_name, image_url FROM products WHERE id = $1 AND vendor_id = $2',
+      [productId, req.user.id]
+    );
+
+    if (productCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found',
+      });
+    }
+
+    // Get performance across all vendor's machines
     const result = await query(
-      `SELECT dc.id, dc.machine_id, dc.product_id, dc.code, dc.discount_type,
-              dc.discount_value, dc.max_uses, dc.current_uses, dc.valid_from,
-              dc.valid_until, dc.is_active, dc.created_at,
-              p.product_name, p.price
-       FROM discount_codes dc
-       LEFT JOIN products p ON dc.product_id = p.id
-       WHERE dc.machine_id = $1 AND dc.vendor_id = $2
-       ORDER BY dc.created_at DESC`,
-      [machineId, req.user.id]
+      `SELECT mp.id, mp.machine_id, mp.is_performing, mp.performance_marked_at, mp.current_stock,
+              vm.machine_name, vm.location
+       FROM machine_products mp
+       JOIN vending_machines vm ON mp.machine_id = vm.id
+       WHERE mp.product_id = $1 AND vm.vendor_id = $2
+       ORDER BY mp.is_performing DESC NULLS LAST, vm.machine_name`,
+      [productId, req.user.id]
+    );
+
+    const stats = {
+      totalMachines: result.rows.length,
+      performing: result.rows.filter(r => r.is_performing === true).length,
+      notPerforming: result.rows.filter(r => r.is_performing === false).length,
+      unmarked: result.rows.filter(r => r.is_performing === null).length,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        product: productCheck.rows[0],
+        machines: result.rows,
+        stats,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching performance comparison:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching performance comparison',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/top-products
+ * Get global Top 50 products across all vendors
+ */
+router.get('/top-products', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT
+        p.id as product_id,
+        p.product_name,
+        p.image_url,
+        COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as yes_count,
+        COUNT(CASE WHEN mp.is_performing = false THEN 1 END) as no_count,
+        COUNT(mp.id) as total_machines,
+        ROUND(
+          COUNT(CASE WHEN mp.is_performing = true THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN mp.is_performing IS NOT NULL THEN 1 END), 0),
+          1
+        ) as performance_percentage
+       FROM products p
+       JOIN machine_products mp ON p.id = mp.product_id
+       WHERE mp.is_performing IS NOT NULL
+       GROUP BY p.id, p.product_name, p.image_url
+       HAVING COUNT(CASE WHEN mp.is_performing IS NOT NULL THEN 1 END) >= 1
+       ORDER BY yes_count DESC, performance_percentage DESC
+       LIMIT 50`
     );
 
     res.json({
       success: true,
       data: {
-        discounts: result.rows,
+        topProducts: result.rows,
         count: result.rows.length,
       },
     });
   } catch (error) {
-    console.error('Error fetching discounts:', error);
+    console.error('Error fetching top products:', error);
     res.status(500).json({
       success: false,
-      message: 'Error fetching discount codes',
-    });
-  }
-});
-
-/**
- * POST /api/vendor/machines/:machineId/discounts
- * Create a new discount code for a machine
- */
-router.post('/machines/:machineId/discounts', async (req, res) => {
-  try {
-    const { machineId } = req.params;
-    const schema = Joi.object({
-      productId: Joi.number().integer().optional().allow(null),
-      code: Joi.string().min(3).max(50).required(),
-      percentOff: Joi.number().min(0).max(100).required(),
-      startsAt: Joi.date().optional(),
-      endsAt: Joi.date().optional(),
-      maxUses: Joi.number().integer().min(1).optional().allow(null),
-    });
-
-    const { error, value } = schema.validate(req.body);
-    if (error) {
-      return res.status(400).json({
-        success: false,
-        message: error.details[0].message,
-      });
-    }
-
-    // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
-
-    // If productId specified, verify product belongs to vendor
-    if (value.productId) {
-      const productCheck = await query(
-        'SELECT id FROM products WHERE id = $1 AND vendor_id = $2',
-        [value.productId, req.user.id]
-      );
-
-      if (productCheck.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Product not found',
-        });
-      }
-    }
-
-    const { productId, code, percentOff, startsAt, endsAt, maxUses } = value;
-
-    const result = await query(
-      `INSERT INTO discount_codes
-       (vendor_id, machine_id, product_id, code, discount_type, discount_value,
-        valid_from, valid_until, max_uses, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
-       RETURNING *`,
-      [
-        req.user.id,
-        machineId,
-        productId || null,
-        code.toUpperCase(),
-        'percentage',
-        percentOff,
-        startsAt || null,
-        endsAt || null,
-        maxUses || null,
-      ]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Discount code created successfully',
-      data: { discount: result.rows[0] },
-    });
-  } catch (error) {
-    console.error('Error creating discount:', error);
-    if (error.message && error.message.includes('unique')) {
-      return res.status(409).json({
-        success: false,
-        message: 'Discount code already exists',
-      });
-    }
-    res.status(500).json({
-      success: false,
-      message: 'Error creating discount code',
-    });
-  }
-});
-
-/**
- * DELETE /api/vendor/machines/:machineId/discounts/:discountId
- * Delete a discount code
- */
-router.delete('/machines/:machineId/discounts/:discountId', async (req, res) => {
-  try {
-    const { machineId, discountId } = req.params;
-
-    // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
-
-    const result = await query(
-      'DELETE FROM discount_codes WHERE id = $1 AND machine_id = $2 AND vendor_id = $3 RETURNING id',
-      [discountId, machineId, req.user.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Discount code not found',
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Discount code deleted successfully',
-    });
-  } catch (error) {
-    console.error('Error deleting discount:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error deleting discount code',
+      message: 'Error fetching top products',
     });
   }
 });
 
 // ============================================
-// POLL ROUTES
+// REDISTRIBUTION PLAN ROUTES
+// ============================================
+
+/**
+ * GET /api/vendor/redistribution-plan
+ * Generate an optimized redistribution plan across all machines
+ * Shows what to REMOVE (underperforming) and ADD (performing) at each machine stop
+ */
+router.get('/redistribution-plan', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    // Get all underperforming products and where they perform well
+    const redistributionData = await query(
+      `WITH product_performance AS (
+        SELECT
+          mp.product_id,
+          p.product_name,
+          mp.machine_id,
+          vm.machine_name,
+          vm.location,
+          mp.current_stock,
+          mp.is_performing,
+          mp.id as inventory_id
+        FROM machine_products mp
+        JOIN products p ON mp.product_id = p.id
+        JOIN vending_machines vm ON mp.machine_id = vm.id
+        WHERE vm.vendor_id = $1
+          AND mp.is_performing IS NOT NULL
+          AND mp.current_stock > 0
+      ),
+      underperforming AS (
+        SELECT * FROM product_performance WHERE is_performing = false
+      ),
+      performing AS (
+        SELECT * FROM product_performance WHERE is_performing = true
+      )
+      SELECT
+        u.product_id,
+        u.product_name,
+        u.machine_id as source_machine_id,
+        u.machine_name as source_machine_name,
+        u.location as source_location,
+        u.current_stock as source_stock,
+        u.inventory_id as source_inventory_id,
+        p.machine_id as target_machine_id,
+        p.machine_name as target_machine_name,
+        p.location as target_location,
+        p.current_stock as target_stock
+      FROM underperforming u
+      JOIN performing p ON u.product_id = p.product_id AND u.machine_id != p.machine_id
+      ORDER BY u.machine_name, u.product_name, p.current_stock ASC`,
+      [vendorId]
+    );
+
+    // Get all machines for the vendor
+    const machinesResult = await query(
+      `SELECT id, machine_name, location
+       FROM vending_machines
+       WHERE vendor_id = $1 AND is_active = true
+       ORDER BY machine_name`,
+      [vendorId]
+    );
+
+    // Organize data by machine (route stops)
+    const routePlan = {};
+    const machines = machinesResult.rows;
+
+    // Initialize route plan for each machine
+    machines.forEach(m => {
+      routePlan[m.id] = {
+        machineId: m.id,
+        machineName: m.machine_name,
+        location: m.location,
+        remove: [],  // Products to PULL OUT (underperforming here)
+        add: []      // Products to PUT IN (performing here, coming from elsewhere)
+      };
+    });
+
+    // Process redistribution data
+    const processedMoves = new Set(); // Track to avoid duplicates
+
+    redistributionData.rows.forEach(row => {
+      const moveKey = `${row.product_id}-${row.source_machine_id}-${row.target_machine_id}`;
+
+      if (!processedMoves.has(moveKey)) {
+        processedMoves.add(moveKey);
+
+        // Add to REMOVE list for source machine
+        const existingRemove = routePlan[row.source_machine_id]?.remove.find(
+          r => r.productId === row.product_id
+        );
+
+        if (!existingRemove && routePlan[row.source_machine_id]) {
+          routePlan[row.source_machine_id].remove.push({
+            productId: row.product_id,
+            productName: row.product_name,
+            currentStock: row.source_stock,
+            inventoryId: row.source_inventory_id,
+            suggestedTargets: [{
+              machineId: row.target_machine_id,
+              machineName: row.target_machine_name,
+              location: row.target_location,
+              currentStock: row.target_stock
+            }]
+          });
+        } else if (existingRemove) {
+          // Add to suggested targets
+          existingRemove.suggestedTargets.push({
+            machineId: row.target_machine_id,
+            machineName: row.target_machine_name,
+            location: row.target_location,
+            currentStock: row.target_stock
+          });
+        }
+
+        // Add to ADD list for target machine
+        const existingAdd = routePlan[row.target_machine_id]?.add.find(
+          a => a.productId === row.product_id && a.sourceMachineId === row.source_machine_id
+        );
+
+        if (!existingAdd && routePlan[row.target_machine_id]) {
+          routePlan[row.target_machine_id].add.push({
+            productId: row.product_id,
+            productName: row.product_name,
+            sourceMachineId: row.source_machine_id,
+            sourceMachineName: row.source_machine_name,
+            sourceLocation: row.source_location,
+            availableStock: row.source_stock
+          });
+        }
+      }
+    });
+
+    // Convert to array and filter out machines with no actions
+    const routeStops = Object.values(routePlan).filter(
+      stop => stop.remove.length > 0 || stop.add.length > 0
+    );
+
+    // Calculate summary stats
+    const totalRemoves = routeStops.reduce((sum, stop) => sum + stop.remove.length, 0);
+    const totalAdds = routeStops.reduce((sum, stop) => sum + stop.add.length, 0);
+
+    res.json({
+      success: true,
+      data: {
+        routeStops,
+        summary: {
+          totalMachinesAffected: routeStops.length,
+          totalProductsToRemove: totalRemoves,
+          totalProductsToAdd: totalAdds,
+          allMachines: machines
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error generating redistribution plan:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error generating redistribution plan',
+    });
+  }
+});
+
+// ============================================
+// SWIPE POLL ROUTES
 // ============================================
 
 /**
  * POST /api/vendor/machines/:machineId/polls
- * Create a poll for a machine
+ * Create a swipe poll for a machine (products for customers to vote on)
  */
 router.post('/machines/:machineId/polls', async (req, res) => {
   try {
@@ -1024,10 +1228,10 @@ router.post('/machines/:machineId/polls', async (req, res) => {
     const vendorId = req.user.id;
 
     const schema = Joi.object({
-      question: Joi.string().min(5).max(500).required(),
-      options: Joi.array().items(
+      question: Joi.string().min(5).max(500).default('Which products would you like to see?'),
+      products: Joi.array().items(
         Joi.object({
-          text: Joi.string().min(1).max(255).required(),
+          name: Joi.string().min(1).max(255).required(),
           imageUrl: Joi.string().uri().allow('', null).optional(),
         })
       ).min(2).max(20).required(),
@@ -1041,7 +1245,7 @@ router.post('/machines/:machineId/polls', async (req, res) => {
       });
     }
 
-    const { question, options } = value;
+    const { question, products } = value;
 
     // Verify machine belongs to vendor
     const machineCheck = await query(
@@ -1056,6 +1260,12 @@ router.post('/machines/:machineId/polls', async (req, res) => {
       });
     }
 
+    // Deactivate any existing active polls for this machine
+    await query(
+      `UPDATE polls SET is_active = false WHERE machine_id = $1 AND is_active = true`,
+      [machineId]
+    );
+
     // Create poll
     const pollResult = await query(
       `INSERT INTO polls (vendor_id, machine_id, poll_question, is_active)
@@ -1066,13 +1276,13 @@ router.post('/machines/:machineId/polls', async (req, res) => {
 
     const poll = pollResult.rows[0];
 
-    // Create poll options
-    const optionPromises = options.map((option, index) =>
+    // Create poll options (products to swipe on)
+    const optionPromises = products.map((product, index) =>
       query(
         `INSERT INTO poll_options (poll_id, option_text, image_url, display_order)
          VALUES ($1, $2, $3, $4)
          RETURNING id, option_text, image_url`,
-        [poll.id, option.text, option.imageUrl || null, index]
+        [poll.id, product.name, product.imageUrl || null, index]
       )
     );
 
@@ -1081,11 +1291,11 @@ router.post('/machines/:machineId/polls', async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Poll created successfully',
+      message: 'Swipe poll created successfully',
       data: {
         poll: {
           ...poll,
-          options: createdOptions,
+          products: createdOptions,
         },
       },
     });
@@ -1094,6 +1304,144 @@ router.post('/machines/:machineId/polls', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error creating poll',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:machineId/polls
+ * Get all polls for a machine
+ */
+router.get('/machines/:machineId/polls', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const vendorId = req.user.id;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id, machine_name FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    const pollsResult = await query(
+      `SELECT p.id, p.poll_question, p.is_active, p.created_at,
+              COUNT(DISTINCT po.id) as product_count,
+              COUNT(DISTINCT pv.id) as total_votes
+       FROM polls p
+       LEFT JOIN poll_options po ON p.id = po.poll_id
+       LEFT JOIN poll_votes pv ON p.id = pv.poll_id
+       WHERE p.machine_id = $1
+       GROUP BY p.id
+       ORDER BY p.created_at DESC`,
+      [machineId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        machine: machineCheck.rows[0],
+        polls: pollsResult.rows,
+        count: pollsResult.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching polls:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching polls',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:machineId/swipe-results
+ * Get swipe poll results for a machine
+ */
+router.get('/machines/:machineId/swipe-results', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const vendorId = req.user.id;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id, machine_name FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    // Get active poll
+    const pollResult = await query(
+      `SELECT id, poll_question, created_at FROM polls
+       WHERE machine_id = $1 AND is_active = true
+       ORDER BY created_at DESC LIMIT 1`,
+      [machineId]
+    );
+
+    if (pollResult.rows.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          machine: machineCheck.rows[0],
+          poll: null,
+          results: [],
+          message: 'No active poll for this machine',
+        },
+      });
+    }
+
+    const poll = pollResult.rows[0];
+
+    // Get results
+    const resultsQuery = await query(
+      `SELECT
+        po.id,
+        po.option_text as product_name,
+        po.image_url,
+        COUNT(CASE WHEN pv.vote_type = 'like' THEN 1 END) as swipe_right,
+        COUNT(CASE WHEN pv.vote_type = 'dislike' THEN 1 END) as swipe_left,
+        COUNT(pv.id) as total_votes
+       FROM poll_options po
+       LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id
+       WHERE po.poll_id = $1
+       GROUP BY po.id, po.option_text, po.image_url
+       ORDER BY swipe_right DESC, total_votes DESC`,
+      [poll.id]
+    );
+
+    const totalVotes = resultsQuery.rows.reduce((sum, row) => sum + parseInt(row.total_votes), 0);
+
+    res.json({
+      success: true,
+      data: {
+        machine: machineCheck.rows[0],
+        poll,
+        results: resultsQuery.rows.map(row => ({
+          ...row,
+          approvalRate: row.total_votes > 0
+            ? Math.round((row.swipe_right / row.total_votes) * 100)
+            : 0,
+        })),
+        totalVotes,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching swipe results:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching swipe results',
     });
   }
 });
@@ -1122,28 +1470,45 @@ router.get('/polls/:pollId/results', async (req, res) => {
 
     const poll = pollCheck.rows[0];
 
-    // Get results from view
+    // Get results
     const resultsQuery = await query(
-      `SELECT option_id, option_text, image_url, approve_count, deny_count,
-              total_votes, approve_percent
-       FROM poll_results
-       WHERE poll_id = $1
-       ORDER BY approve_percent DESC, total_votes DESC`,
+      `SELECT
+        po.id as option_id,
+        po.option_text as product_name,
+        po.image_url,
+        COUNT(CASE WHEN pv.vote_type = 'like' THEN 1 END) as swipe_right,
+        COUNT(CASE WHEN pv.vote_type = 'dislike' THEN 1 END) as swipe_left,
+        COUNT(pv.id) as total_votes
+       FROM poll_options po
+       LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id
+       WHERE po.poll_id = $1
+       GROUP BY po.id, po.option_text, po.image_url
+       ORDER BY swipe_right DESC`,
       [pollId]
     );
 
     const totalVotes = resultsQuery.rows.reduce((sum, row) => sum + parseInt(row.total_votes), 0);
+
+    // Get machine name
+    const machineResult = await query(
+      `SELECT machine_name FROM vending_machines WHERE id = $1`,
+      [poll.machine_id]
+    );
 
     res.json({
       success: true,
       data: {
         poll: {
           id: poll.id,
-          question: poll.poll_question,
-          machineId: poll.machine_id,
-          createdAt: poll.created_at,
+          poll_question: poll.poll_question,
+          machine_name: machineResult.rows[0]?.machine_name || 'Unknown Machine',
         },
-        results: resultsQuery.rows,
+        results: resultsQuery.rows.map(row => ({
+          ...row,
+          approval_percent: row.total_votes > 0
+            ? Math.round((row.swipe_right / row.total_votes) * 100)
+            : 0,
+        })),
         totalVotes,
       },
     });
@@ -1156,14 +1521,604 @@ router.get('/polls/:pollId/results', async (req, res) => {
   }
 });
 
+// ========================================
+// PRODUCT REDISTRIBUTION ROUTES
+// ========================================
+
 /**
- * GET /api/vendor/machines/:machineId/polls
- * Get all polls for a machine
+ * GET /api/vendor/machines/:machineId/redistribution-targets
+ * Get other machines where a product is performing well (for redistribution)
  */
-router.get('/machines/:machineId/polls', async (req, res) => {
+router.get('/machines/:machineId/redistribution-targets', async (req, res) => {
   try {
     const { machineId } = req.params;
+    const { productId } = req.query;
+
+    if (!productId) {
+      return res.status(400).json({
+        success: false,
+        message: 'productId query parameter is required',
+      });
+    }
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id, machine_name FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    // Get product info
+    const productCheck = await query(
+      'SELECT id, product_name, price FROM products WHERE id = $1 AND vendor_id = $2',
+      [productId, req.user.id]
+    );
+
+    if (productCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found',
+      });
+    }
+
+    // Get source machine inventory for this product
+    const sourceInventory = await query(
+      `SELECT current_stock, is_performing
+       FROM machine_products
+       WHERE machine_id = $1 AND product_id = $2`,
+      [machineId, productId]
+    );
+
+    // Get other machines where this product exists and is performing well
+    const targetMachines = await query(
+      `SELECT
+         vm.id as machine_id,
+         vm.machine_name,
+         vm.location,
+         mp.current_stock,
+         mp.is_performing,
+         mp.performance_marked_at
+       FROM vending_machines vm
+       LEFT JOIN machine_products mp ON vm.id = mp.machine_id AND mp.product_id = $1
+       WHERE vm.vendor_id = $2
+         AND vm.id != $3
+         AND vm.is_active = true
+       ORDER BY
+         CASE WHEN mp.is_performing = true THEN 0 ELSE 1 END,
+         mp.current_stock ASC NULLS LAST`,
+      [productId, req.user.id, machineId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        product: productCheck.rows[0],
+        sourceMachine: {
+          id: parseInt(machineId),
+          machine_name: machineCheck.rows[0].machine_name,
+          current_stock: sourceInventory.rows[0]?.current_stock || 0,
+          is_performing: sourceInventory.rows[0]?.is_performing,
+        },
+        targetMachines: targetMachines.rows.map(m => ({
+          machine_id: m.machine_id,
+          machine_name: m.machine_name,
+          location: m.location,
+          current_stock: m.current_stock || 0,
+          is_performing: m.is_performing,
+          performance_marked_at: m.performance_marked_at,
+          has_product: m.current_stock !== null,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching redistribution targets:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching redistribution targets',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/redistribution
+ * Execute a product redistribution between machines
+ */
+router.post('/redistribution', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      sourceMachineId: Joi.number().integer().required(),
+      targetMachineId: Joi.number().integer().required(),
+      productId: Joi.number().integer().required(),
+      quantity: Joi.number().integer().min(1).required(),
+      reason: Joi.string().max(500).optional(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { sourceMachineId, targetMachineId, productId, quantity, reason } = value;
+
+    if (sourceMachineId === targetMachineId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Source and target machines must be different',
+      });
+    }
+
+    // Execute redistribution in a transaction
+    const result = await transaction(async (client) => {
+      // Verify both machines belong to vendor
+      const machinesCheck = await client.query(
+        `SELECT id, machine_name FROM vending_machines
+         WHERE id IN ($1, $2) AND vendor_id = $3`,
+        [sourceMachineId, targetMachineId, req.user.id]
+      );
+
+      if (machinesCheck.rows.length !== 2) {
+        throw new Error('One or both machines not found or not owned by vendor');
+      }
+
+      // Verify product belongs to vendor
+      const productCheck = await client.query(
+        'SELECT id, product_name FROM products WHERE id = $1 AND vendor_id = $2',
+        [productId, req.user.id]
+      );
+
+      if (productCheck.rows.length === 0) {
+        throw new Error('Product not found');
+      }
+
+      // Get source inventory with lock
+      const sourceInventory = await client.query(
+        `SELECT id, current_stock FROM machine_products
+         WHERE machine_id = $1 AND product_id = $2 FOR UPDATE`,
+        [sourceMachineId, productId]
+      );
+
+      if (sourceInventory.rows.length === 0) {
+        throw new Error('Product not found in source machine');
+      }
+
+      const sourceStock = sourceInventory.rows[0].current_stock;
+      if (sourceStock < quantity) {
+        throw new Error(`Insufficient stock. Source has ${sourceStock}, requested ${quantity}`);
+      }
+
+      // Get or create target inventory
+      let targetInventory = await client.query(
+        `SELECT id, current_stock FROM machine_products
+         WHERE machine_id = $1 AND product_id = $2 FOR UPDATE`,
+        [targetMachineId, productId]
+      );
+
+      let targetStockBefore = 0;
+      let targetInventoryId;
+
+      if (targetInventory.rows.length === 0) {
+        // Check product limit (40 max per machine)
+        const countCheck = await client.query(
+          'SELECT COUNT(*) as count FROM machine_products WHERE machine_id = $1',
+          [targetMachineId]
+        );
+
+        if (parseInt(countCheck.rows[0].count) >= 40) {
+          throw new Error('Target machine has reached maximum product limit (40)');
+        }
+
+        // Create new inventory entry
+        const newEntry = await client.query(
+          `INSERT INTO machine_products (machine_id, product_id, current_stock)
+           VALUES ($1, $2, 0) RETURNING id, current_stock`,
+          [targetMachineId, productId]
+        );
+        targetInventoryId = newEntry.rows[0].id;
+        targetStockBefore = 0;
+      } else {
+        targetInventoryId = targetInventory.rows[0].id;
+        targetStockBefore = targetInventory.rows[0].current_stock;
+      }
+
+      // Update source stock
+      const newSourceStock = sourceStock - quantity;
+
+      if (newSourceStock === 0) {
+        // Remove product from source machine entirely when fully transferred
+        await client.query(
+          'DELETE FROM machine_products WHERE id = $1',
+          [sourceInventory.rows[0].id]
+        );
+      } else {
+        await client.query(
+          'UPDATE machine_products SET current_stock = $1 WHERE id = $2',
+          [newSourceStock, sourceInventory.rows[0].id]
+        );
+      }
+
+      // Update target stock
+      await client.query(
+        'UPDATE machine_products SET current_stock = current_stock + $1 WHERE id = $2',
+        [quantity, targetInventoryId]
+      );
+
+      // Record redistribution in audit log
+      await client.query(
+        `INSERT INTO product_redistributions
+         (source_machine_id, target_machine_id, product_id, quantity_transferred,
+          reason, performed_by, source_stock_before, source_stock_after,
+          target_stock_before, target_stock_after)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          sourceMachineId, targetMachineId, productId, quantity,
+          reason || null, req.user.id,
+          sourceStock, sourceStock - quantity,
+          targetStockBefore, targetStockBefore + quantity
+        ]
+      );
+
+      return {
+        product: productCheck.rows[0],
+        quantity,
+        sourceStockBefore: sourceStock,
+        sourceStockAfter: sourceStock - quantity,
+        targetStockBefore,
+        targetStockAfter: targetStockBefore + quantity,
+      };
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully transferred ${result.quantity} units of ${result.product.product_name}`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error executing redistribution:', error);
+    res.status(error.message.includes('not found') || error.message.includes('Insufficient') ? 400 : 500).json({
+      success: false,
+      message: error.message || 'Error executing redistribution',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/redistribution-history
+ * Get redistribution history for audit purposes
+ */
+router.get('/redistribution-history', async (req, res) => {
+  try {
+    const { machineId, limit = 50 } = req.query;
+
+    let whereClause = 'WHERE pr.performed_by = $1';
+    const params = [req.user.id];
+
+    if (machineId) {
+      whereClause += ' AND (pr.source_machine_id = $2 OR pr.target_machine_id = $2)';
+      params.push(machineId);
+    }
+
+    const result = await query(
+      `SELECT
+         pr.id,
+         pr.quantity_transferred,
+         pr.reason,
+         pr.source_stock_before,
+         pr.source_stock_after,
+         pr.target_stock_before,
+         pr.target_stock_after,
+         pr.created_at,
+         p.id as product_id,
+         p.product_name,
+         sm.id as source_machine_id,
+         sm.machine_name as source_machine_name,
+         tm.id as target_machine_id,
+         tm.machine_name as target_machine_name
+       FROM product_redistributions pr
+       JOIN products p ON pr.product_id = p.id
+       JOIN vending_machines sm ON pr.source_machine_id = sm.id
+       JOIN vending_machines tm ON pr.target_machine_id = tm.id
+       ${whereClause}
+       ORDER BY pr.created_at DESC
+       LIMIT $${params.length + 1}`,
+      [...params, parseInt(limit)]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        redistributions: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching redistribution history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching redistribution history',
+    });
+  }
+});
+
+// ============================================
+// MACHINE NOTES ROUTES
+// ============================================
+
+/**
+ * PUT /api/vendor/machines/:id/notes
+ * Update notes for a specific machine
+ */
+router.put('/machines/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
     const vendorId = req.user.id;
+
+    const schema = Joi.object({
+      notes: Joi.string().allow('', null).max(2000),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [id, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    // Update notes
+    const result = await query(
+      `UPDATE vending_machines SET notes = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, machine_name, notes`,
+      [value.notes || null, id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Notes updated',
+      data: { machine: result.rows[0] },
+    });
+  } catch (error) {
+    console.error('Error updating machine notes:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating notes',
+    });
+  }
+});
+
+// ============================================
+// PRODUCT SUGGESTIONS ROUTES
+// ============================================
+
+/**
+ * GET /api/vendor/suggestions
+ * Get all product suggestions across all machines
+ */
+router.get('/suggestions', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+    const { status, machineId } = req.query;
+
+    let whereClause = 'WHERE vm.vendor_id = $1';
+    const params = [vendorId];
+
+    if (status) {
+      params.push(status);
+      whereClause += ` AND ps.status = $${params.length}`;
+    }
+
+    if (machineId) {
+      params.push(machineId);
+      whereClause += ` AND ps.machine_id = $${params.length}`;
+    }
+
+    const result = await query(
+      `SELECT ps.id, ps.machine_id, ps.suggestion_text, ps.status,
+              ps.vendor_notes, ps.created_at, ps.reviewed_at,
+              vm.machine_name, vm.location
+       FROM product_suggestions ps
+       JOIN vending_machines vm ON ps.machine_id = vm.id
+       ${whereClause}
+       ORDER BY ps.created_at DESC
+       LIMIT 100`,
+      params
+    );
+
+    // Get counts by status
+    const countsResult = await query(
+      `SELECT ps.status, COUNT(*) as count
+       FROM product_suggestions ps
+       JOIN vending_machines vm ON ps.machine_id = vm.id
+       WHERE vm.vendor_id = $1
+       GROUP BY ps.status`,
+      [vendorId]
+    );
+
+    const counts = { pending: 0, reviewed: 0, added: 0, dismissed: 0 };
+    countsResult.rows.forEach(row => {
+      counts[row.status] = parseInt(row.count);
+    });
+
+    res.json({
+      success: true,
+      data: {
+        suggestions: result.rows,
+        counts,
+        total: result.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching suggestions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching suggestions',
+    });
+  }
+});
+
+/**
+ * PUT /api/vendor/suggestions/:id
+ * Update suggestion status (reviewed, added, dismissed)
+ */
+router.put('/suggestions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vendorId = req.user.id;
+
+    const schema = Joi.object({
+      status: Joi.string().valid('pending', 'reviewed', 'added', 'dismissed').required(),
+      vendorNotes: Joi.string().allow('', null).max(500),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    // Verify suggestion belongs to vendor's machine
+    const suggestionCheck = await query(
+      `SELECT ps.id FROM product_suggestions ps
+       JOIN vending_machines vm ON ps.machine_id = vm.id
+       WHERE ps.id = $1 AND vm.vendor_id = $2`,
+      [id, vendorId]
+    );
+
+    if (suggestionCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Suggestion not found',
+      });
+    }
+
+    // Update suggestion
+    const result = await query(
+      `UPDATE product_suggestions
+       SET status = $1, vendor_notes = $2, reviewed_at = NOW()
+       WHERE id = $3
+       RETURNING id, suggestion_text, status, vendor_notes, reviewed_at`,
+      [value.status, value.vendorNotes || null, id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Suggestion updated',
+      data: { suggestion: result.rows[0] },
+    });
+  } catch (error) {
+    console.error('Error updating suggestion:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating suggestion',
+    });
+  }
+});
+
+// ============================================
+// EXPIRATION TRACKING ROUTES
+// ============================================
+
+/**
+ * GET /api/vendor/expiring-products
+ * Get products expiring within the next 14 days
+ */
+router.get('/expiring-products', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+    const { days = 14 } = req.query;
+
+    const result = await query(
+      `SELECT mp.id as inventory_id, mp.machine_id, mp.product_id,
+              mp.current_stock, mp.expiration_date,
+              mp.expiration_date - CURRENT_DATE as days_until_expiration,
+              p.product_name, p.image_url,
+              vm.machine_name, vm.location
+       FROM machine_products mp
+       JOIN products p ON mp.product_id = p.id
+       JOIN vending_machines vm ON mp.machine_id = vm.id
+       WHERE vm.vendor_id = $1
+         AND mp.expiration_date IS NOT NULL
+         AND mp.expiration_date <= CURRENT_DATE + INTERVAL '1 day' * $2
+         AND mp.current_stock > 0
+       ORDER BY mp.expiration_date ASC`,
+      [vendorId, parseInt(days)]
+    );
+
+    // Categorize by urgency
+    const expired = result.rows.filter(r => r.days_until_expiration < 0);
+    const expiringSoon = result.rows.filter(r => r.days_until_expiration >= 0 && r.days_until_expiration <= 3);
+    const expiringLater = result.rows.filter(r => r.days_until_expiration > 3);
+
+    res.json({
+      success: true,
+      data: {
+        products: result.rows,
+        summary: {
+          expired: expired.length,
+          expiringSoon: expiringSoon.length,
+          expiringLater: expiringLater.length,
+          total: result.rows.length,
+        },
+        categories: {
+          expired,
+          expiringSoon,
+          expiringLater,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching expiring products:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching expiring products',
+    });
+  }
+});
+
+/**
+ * PUT /api/vendor/machines/:machineId/inventory/:id/expiration
+ * Update expiration date for an inventory item
+ */
+router.put('/machines/:machineId/inventory/:id/expiration', async (req, res) => {
+  try {
+    const { machineId, id } = req.params;
+    const vendorId = req.user.id;
+
+    const schema = Joi.object({
+      expirationDate: Joi.date().allow(null),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
 
     // Verify machine belongs to vendor
     const machineCheck = await query(
@@ -1178,29 +2133,32 @@ router.get('/machines/:machineId/polls', async (req, res) => {
       });
     }
 
-    const pollsResult = await query(
-      `SELECT p.id, p.poll_question, p.is_active, p.created_at,
-              COUNT(DISTINCT pv.id) as total_votes
-       FROM polls p
-       LEFT JOIN poll_votes pv ON p.id = pv.poll_id
-       WHERE p.machine_id = $1
-       GROUP BY p.id
-       ORDER BY p.created_at DESC`,
-      [machineId]
+    // Update expiration date
+    const result = await query(
+      `UPDATE machine_products
+       SET expiration_date = $1, updated_at = NOW()
+       WHERE id = $2 AND machine_id = $3
+       RETURNING id, product_id, expiration_date`,
+      [value.expirationDate || null, id, machineId]
     );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Inventory item not found',
+      });
+    }
 
     res.json({
       success: true,
-      data: {
-        polls: pollsResult.rows,
-        count: pollsResult.rows.length,
-      },
+      message: 'Expiration date updated',
+      data: { item: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error fetching polls:', error);
+    console.error('Error updating expiration date:', error);
     res.status(500).json({
       success: false,
-      message: 'Error fetching polls',
+      message: 'Error updating expiration date',
     });
   }
 });

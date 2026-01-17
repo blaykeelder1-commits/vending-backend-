@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS rebates (
 );
 
 -- Create indexes
-CREATE INDEX idx_rebates_customer ON rebates(customer_id);
-CREATE INDEX idx_rebates_status ON rebates(status);
-CREATE INDEX idx_rebates_machine ON rebates(machine_id);
-CREATE INDEX idx_rebates_submitted ON rebates(submitted_at);
+CREATE INDEX IF NOT EXISTS idx_rebates_customer ON rebates(customer_id);
+CREATE INDEX IF NOT EXISTS idx_rebates_status ON rebates(status);
+CREATE INDEX IF NOT EXISTS idx_rebates_machine ON rebates(machine_id);
+CREATE INDEX IF NOT EXISTS idx_rebates_submitted ON rebates(submitted_at);

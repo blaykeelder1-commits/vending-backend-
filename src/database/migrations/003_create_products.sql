@@ -12,9 +12,10 @@ CREATE TABLE IF NOT EXISTS products (
 );
 
 -- Create indexes
-CREATE INDEX idx_products_vendor ON products(vendor_id);
-CREATE INDEX idx_products_active ON products(is_active);
+CREATE INDEX IF NOT EXISTS idx_products_vendor ON products(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_products_active ON products(is_active);
 
 -- Create trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS update_products_updated_at ON products;
 CREATE TRIGGER update_products_updated_at BEFORE UPDATE ON products
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS customer_sessions (
 );
 
 -- Create indexes
-CREATE INDEX idx_sessions_token ON customer_sessions(session_token);
-CREATE INDEX idx_sessions_customer ON customer_sessions(customer_id);
-CREATE INDEX idx_sessions_machine ON customer_sessions(machine_id);
-CREATE INDEX idx_sessions_expires ON customer_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON customer_sessions(session_token);
+CREATE INDEX IF NOT EXISTS idx_sessions_customer ON customer_sessions(customer_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_machine ON customer_sessions(machine_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON customer_sessions(expires_at);

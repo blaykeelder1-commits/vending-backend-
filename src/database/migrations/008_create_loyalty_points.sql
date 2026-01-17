@@ -11,10 +11,10 @@ CREATE TABLE IF NOT EXISTS loyalty_points (
 );
 
 -- Create indexes
-CREATE INDEX idx_loyalty_customer ON loyalty_points(customer_id);
-CREATE INDEX idx_loyalty_machine ON loyalty_points(machine_id);
-CREATE INDEX idx_loyalty_rebate ON loyalty_points(rebate_id);
-CREATE INDEX idx_loyalty_created ON loyalty_points(created_at);
+CREATE INDEX IF NOT EXISTS idx_loyalty_customer ON loyalty_points(customer_id);
+CREATE INDEX IF NOT EXISTS idx_loyalty_machine ON loyalty_points(machine_id);
+CREATE INDEX IF NOT EXISTS idx_loyalty_rebate ON loyalty_points(rebate_id);
+CREATE INDEX IF NOT EXISTS idx_loyalty_created ON loyalty_points(created_at);
 
 -- Create view for customer total points
 CREATE OR REPLACE VIEW customer_loyalty_totals AS

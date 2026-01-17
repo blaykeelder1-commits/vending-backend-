@@ -13,10 +13,11 @@ CREATE TABLE IF NOT EXISTS vending_machines (
 );
 
 -- Create indexes
-CREATE INDEX idx_machines_vendor ON vending_machines(vendor_id);
-CREATE INDEX idx_machines_qr ON vending_machines(qr_code_data);
-CREATE INDEX idx_machines_active ON vending_machines(is_active);
+CREATE INDEX IF NOT EXISTS idx_machines_vendor ON vending_machines(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_machines_qr ON vending_machines(qr_code_data);
+CREATE INDEX IF NOT EXISTS idx_machines_active ON vending_machines(is_active);
 
 -- Create trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS update_vending_machines_updated_at ON vending_machines;
 CREATE TRIGGER update_vending_machines_updated_at BEFORE UPDATE ON vending_machines
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

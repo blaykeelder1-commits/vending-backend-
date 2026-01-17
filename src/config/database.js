@@ -5,7 +5,7 @@ require('dotenv').config();
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 20, // Maximum number of clients in the pool
+  max: 50, // Maximum number of clients in the pool (increased for scale)
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 20000,
 });
@@ -17,7 +17,8 @@ pool.on('connect', () => {
 
 pool.on('error', (err) => {
   console.error('Unexpected error on idle PostgreSQL client', err);
-  process.exit(-1);
+  // Don't exit - let the pool recover or individual queries fail gracefully
+  // The pool will automatically attempt to reconnect on next query
 });
 
 // Query helper function

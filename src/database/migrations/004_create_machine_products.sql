@@ -11,9 +11,10 @@ CREATE TABLE IF NOT EXISTS machine_products (
 );
 
 -- Create indexes
-CREATE INDEX idx_machine_products_machine ON machine_products(machine_id);
-CREATE INDEX idx_machine_products_product ON machine_products(product_id);
+CREATE INDEX IF NOT EXISTS idx_machine_products_machine ON machine_products(machine_id);
+CREATE INDEX IF NOT EXISTS idx_machine_products_product ON machine_products(product_id);
 
 -- Create trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS update_machine_products_updated_at ON machine_products;
 CREATE TRIGGER update_machine_products_updated_at BEFORE UPDATE ON machine_products
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

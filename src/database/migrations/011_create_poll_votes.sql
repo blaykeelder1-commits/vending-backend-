@@ -12,10 +12,10 @@ CREATE TABLE IF NOT EXISTS poll_votes (
 );
 
 -- Create indexes
-CREATE INDEX idx_votes_poll ON poll_votes(poll_id);
-CREATE INDEX idx_votes_option ON poll_votes(poll_option_id);
-CREATE INDEX idx_votes_customer ON poll_votes(customer_id);
-CREATE INDEX idx_votes_session ON poll_votes(session_id);
+CREATE INDEX IF NOT EXISTS idx_votes_poll ON poll_votes(poll_id);
+CREATE INDEX IF NOT EXISTS idx_votes_option ON poll_votes(poll_option_id);
+CREATE INDEX IF NOT EXISTS idx_votes_customer ON poll_votes(customer_id);
+CREATE INDEX IF NOT EXISTS idx_votes_session ON poll_votes(session_id);
 
 -- Create view for poll results
 CREATE OR REPLACE VIEW poll_results AS

@@ -10,6 +10,6 @@ CREATE TABLE IF NOT EXISTS poll_options (
 );
 
 -- Create indexes
-CREATE INDEX idx_poll_options_poll ON poll_options(poll_id);
-CREATE INDEX idx_poll_options_product ON poll_options(product_id);
-CREATE INDEX idx_poll_options_order ON poll_options(poll_id, display_order);
+CREATE INDEX IF NOT EXISTS idx_poll_options_poll ON poll_options(poll_id);
+CREATE INDEX IF NOT EXISTS idx_poll_options_product ON poll_options(product_id);
+CREATE INDEX IF NOT EXISTS idx_poll_options_order ON poll_options(poll_id, display_order);

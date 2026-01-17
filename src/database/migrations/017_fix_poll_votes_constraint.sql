@@ -2,14 +2,26 @@
 ALTER TABLE poll_votes DROP CONSTRAINT IF EXISTS unique_customer_vote;
 ALTER TABLE poll_votes DROP CONSTRAINT IF EXISTS unique_session_vote;
 
--- Allow one vote per option per customer
-ALTER TABLE poll_votes ADD CONSTRAINT unique_customer_option_vote
-  UNIQUE(poll_option_id, customer_id)
-  WHERE customer_id IS NOT NULL;
+-- Allow one vote per option per customer (add only if not exists)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'unique_customer_option_vote'
+  ) THEN
+    ALTER TABLE poll_votes ADD CONSTRAINT unique_customer_option_vote
+      UNIQUE(poll_option_id, customer_id);
+  END IF;
+END $$;
 
-ALTER TABLE poll_votes ADD CONSTRAINT unique_session_option_vote
-  UNIQUE(poll_option_id, session_id)
-  WHERE session_id IS NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'unique_session_option_vote'
+  ) THEN
+    ALTER TABLE poll_votes ADD CONSTRAINT unique_session_option_vote
+      UNIQUE(poll_option_id, session_id);
+  END IF;
+END $$;
 
 -- Update poll_results view to include percentages
 DROP VIEW IF EXISTS poll_results;

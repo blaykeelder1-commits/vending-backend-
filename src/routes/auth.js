@@ -4,7 +4,8 @@ const Joi = require('joi');
 const User = require('../models/User');
 const CustomerSession = require('../models/CustomerSession');
 const { validateQRCodeData } = require('../services/qrCodeService');
-const { query } = require('../config/database');
+const { query, transaction } = require('../config/database');
+const { scheduleOnboardingSequence } = require('../services/emailService');
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ const vendorRegisterSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
   fullName: Joi.string().min(2).required(),
+  referralCode: Joi.string().alphanum().length(8).optional(),
 });
 
 const vendorLoginSchema = Joi.object({
@@ -50,10 +52,63 @@ router.post('/vendor/register', async (req, res) => {
       });
     }
 
-    const { email, password, fullName } = value;
+    const { email, password, fullName, referralCode } = value;
+
+    // Validate referral code if provided
+    let referrerInfo = null;
+    if (referralCode) {
+      const refResult = await query(
+        `SELECT rc.id, rc.user_id, rc.reward_days, u.full_name as referrer_name
+         FROM referral_codes rc
+         JOIN users u ON rc.user_id = u.id
+         WHERE rc.code = $1
+           AND rc.is_active = true
+           AND (rc.max_uses IS NULL OR rc.uses_count < rc.max_uses)
+           AND (rc.expires_at IS NULL OR rc.expires_at > NOW())`,
+        [referralCode.toUpperCase()]
+      );
+
+      if (refResult.rows.length > 0) {
+        referrerInfo = refResult.rows[0];
+      }
+    }
 
     // Create vendor user
     const user = await User.createVendor({ email, password, fullName });
+
+    // Process referral if valid
+    if (referrerInfo) {
+      try {
+        // Create referral record
+        await query(
+          `INSERT INTO referrals (referrer_id, referred_id, referral_code_id, status)
+           VALUES ($1, $2, $3, 'completed')`,
+          [referrerInfo.user_id, user.id, referrerInfo.id]
+        );
+
+        // Increment referral code usage
+        await query(
+          `UPDATE referral_codes SET uses_count = uses_count + 1 WHERE id = $1`,
+          [referrerInfo.id]
+        );
+
+        // Store referral code used
+        await query(
+          `UPDATE users SET referral_code_used = $1 WHERE id = $2`,
+          [referralCode.toUpperCase(), user.id]
+        );
+
+        console.log(`[Referral] User ${user.id} referred by ${referrerInfo.user_id}`);
+      } catch (refError) {
+        console.error('[Referral] Error processing referral:', refError);
+        // Don't fail registration if referral processing fails
+      }
+    }
+
+    // Schedule onboarding email sequence
+    scheduleOnboardingSequence(user.id, email, fullName).catch(err => {
+      console.error('[Email] Error scheduling onboarding:', err);
+    });
 
     // Generate JWT token
     const token = jwt.sign(
@@ -73,6 +128,7 @@ router.post('/vendor/register', async (req, res) => {
           role: user.role,
         },
         token,
+        referredBy: referrerInfo ? referrerInfo.referrer_name : null,
       },
     });
   } catch (error) {
@@ -126,6 +182,11 @@ router.post('/vendor/login', async (req, res) => {
         message: 'Invalid email or password',
       });
     }
+
+    // Update last login timestamp
+    query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(err => {
+      console.error('Error updating last_login_at:', err);
+    });
 
     // Generate JWT token
     const token = jwt.sign(

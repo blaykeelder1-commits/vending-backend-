@@ -11,11 +11,12 @@ CREATE TABLE IF NOT EXISTS polls (
 );
 
 -- Create indexes
-CREATE INDEX idx_polls_vendor ON polls(vendor_id);
-CREATE INDEX idx_polls_machine ON polls(machine_id);
-CREATE INDEX idx_polls_active ON polls(is_active);
-CREATE INDEX idx_polls_created ON polls(created_at);
+CREATE INDEX IF NOT EXISTS idx_polls_vendor ON polls(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_polls_machine ON polls(machine_id);
+CREATE INDEX IF NOT EXISTS idx_polls_active ON polls(is_active);
+CREATE INDEX IF NOT EXISTS idx_polls_created ON polls(created_at);
 
 -- Create trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS update_polls_updated_at ON polls;
 CREATE TRIGGER update_polls_updated_at BEFORE UPDATE ON polls
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

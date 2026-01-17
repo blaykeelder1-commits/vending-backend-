@@ -4,7 +4,22 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
+const Sentry = require('@sentry/node');
 require('dotenv').config();
+
+// Initialize Sentry for error tracking (if DSN is provided)
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    tracesSampleRate: 0.1, // Sample 10% of transactions for performance monitoring
+    integrations: [
+      Sentry.httpIntegration(),
+      Sentry.expressIntegration(),
+    ],
+  });
+  console.log('Sentry error tracking initialized');
+}
 
 const app = express();
 
@@ -30,15 +45,33 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Rate limiting
+// General rate limiting for all API routes
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  message: 'Too many requests from this IP, please try again later.',
+  message: { success: false, message: 'Too many requests from this IP, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use('/api/', limiter);
+
+// Strict rate limiting for login endpoints (5 requests per minute)
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5,
+  message: { success: false, message: 'Too many login attempts, please try again in a minute.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Strict rate limiting for registration endpoints (3 requests per hour)
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3,
+  message: { success: false, message: 'Too many registration attempts, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -109,6 +142,58 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
+// Public stats endpoint for social proof
+app.get('/api/stats', async (req, res) => {
+  const { pool } = require('./config/database');
+  const { cache } = require('./config/redis');
+
+  try {
+    // Check cache first (5 minute TTL)
+    const cacheKey = 'public_stats';
+    const cachedStats = await cache.get(cacheKey);
+
+    if (cachedStats) {
+      return res.json({
+        success: true,
+        data: JSON.parse(cachedStats),
+        cached: true,
+      });
+    }
+
+    // Get public statistics
+    const vendorsResult = await pool.query(
+      "SELECT COUNT(*) as count FROM users WHERE role = 'vendor'"
+    );
+    const machinesResult = await pool.query(
+      'SELECT COUNT(*) as count FROM vending_machines WHERE is_active = true'
+    );
+    const productsResult = await pool.query(
+      'SELECT COUNT(*) as count FROM machine_products'
+    );
+
+    const stats = {
+      operators: parseInt(vendorsResult.rows[0].count),
+      machines: parseInt(machinesResult.rows[0].count),
+      products: parseInt(productsResult.rows[0].count),
+      lastUpdated: new Date().toISOString(),
+    };
+
+    // Cache the stats
+    await cache.set(cacheKey, JSON.stringify(stats), 300);
+
+    res.json({
+      success: true,
+      data: stats,
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching statistics',
+    });
+  }
+});
+
 // Admin DB info endpoint (protected)
 app.get('/api/admin/db-info', async (req, res) => {
   const { pool } = require('./config/database');
@@ -145,10 +230,19 @@ app.get('/api/admin/db-info', async (req, res) => {
   }
 });
 
-// API routes
-app.use('/api/auth', require('./routes/auth'));
+// API routes with auth-specific rate limiters
+const authRouter = require('./routes/auth');
+
+// Apply strict rate limiting to auth endpoints
+app.use('/api/auth/vendor/login', loginLimiter);
+app.use('/api/auth/vendor/register', registerLimiter);
+app.use('/api/auth/customer/login', loginLimiter);
+app.use('/api/auth/customer/register', registerLimiter);
+
+app.use('/api/auth', authRouter);
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
+app.use('/api/referral', require('./routes/referral'));
 
 // 404 handler
 app.use((req, res) => {
@@ -161,6 +255,11 @@ app.use((req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('Error:', err);
+
+  // Capture error in Sentry if initialized
+  if (process.env.SENTRY_DSN) {
+    Sentry.captureException(err);
+  }
 
   const statusCode = err.statusCode || 500;
   const message = err.message || 'Internal Server Error';
