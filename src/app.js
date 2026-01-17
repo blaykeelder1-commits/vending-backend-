@@ -155,7 +155,7 @@ app.get('/api/stats', async (req, res) => {
     if (cachedStats) {
       return res.json({
         success: true,
-        data: JSON.parse(cachedStats),
+        data: cachedStats,
         cached: true,
       });
     }
@@ -178,8 +178,8 @@ app.get('/api/stats', async (req, res) => {
       lastUpdated: new Date().toISOString(),
     };
 
-    // Cache the stats
-    await cache.set(cacheKey, JSON.stringify(stats), 300);
+    // Cache the stats (cache.set handles JSON serialization)
+    await cache.set(cacheKey, stats, 300);
 
     res.json({
       success: true,
