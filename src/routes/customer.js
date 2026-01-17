@@ -169,6 +169,7 @@ router.get('/machine', verifySession, async (req, res) => {
 /**
  * GET /api/customer/polls
  * Get active swipe poll for the current machine
+ * If no vendor-created poll exists, auto-generates one from underperforming products
  */
 router.get('/polls', verifySession, async (req, res) => {
   try {
@@ -176,8 +177,8 @@ router.get('/polls', verifySession, async (req, res) => {
     const sessionId = req.session.id;
 
     // Get active poll for this machine
-    const pollResult = await query(
-      `SELECT p.id, p.poll_question as question, p.created_at
+    let pollResult = await query(
+      `SELECT p.id, p.poll_question as question, p.created_at, p.poll_type, p.is_auto_generated
        FROM polls p
        WHERE p.machine_id = $1 AND p.is_active = true
        ORDER BY p.created_at DESC
@@ -185,18 +186,104 @@ router.get('/polls', verifySession, async (req, res) => {
       [machineId]
     );
 
-    if (pollResult.rows.length === 0) {
-      return res.json({
-        success: true,
-        data: {
-          poll: null,
-          products: [],
-          message: 'No active poll for this machine',
-        },
-      });
-    }
+    let poll = pollResult.rows[0];
 
-    const poll = pollResult.rows[0];
+    // If no active poll exists, auto-generate one from underperforming products
+    if (!poll) {
+      // Get machine info for the poll question
+      const machineInfo = await query(
+        `SELECT vm.id, vm.machine_name, vm.vendor_id
+         FROM vending_machines vm
+         WHERE vm.id = $1`,
+        [machineId]
+      );
+
+      if (machineInfo.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Machine not found',
+        });
+      }
+
+      const machine = machineInfo.rows[0];
+
+      // Get underperforming products (is_performing = false OR is_performing IS NULL)
+      const underperformersResult = await query(
+        `SELECT mp.id as machine_product_id, mp.product_id,
+                p.product_name, p.image_url
+         FROM machine_products mp
+         JOIN products p ON mp.product_id = p.id
+         WHERE mp.machine_id = $1
+           AND (mp.is_performing = false OR mp.is_performing IS NULL)
+           AND p.is_active = true
+         ORDER BY mp.is_performing ASC NULLS LAST, p.product_name
+         LIMIT 20`,
+        [machineId]
+      );
+
+      // If no underperformers, try to get any products from this machine
+      let productsToShow = underperformersResult.rows;
+
+      if (productsToShow.length === 0) {
+        const anyProductsResult = await query(
+          `SELECT mp.id as machine_product_id, mp.product_id,
+                  p.product_name, p.image_url
+           FROM machine_products mp
+           JOIN products p ON mp.product_id = p.id
+           WHERE mp.machine_id = $1 AND p.is_active = true
+           ORDER BY p.product_name
+           LIMIT 20`,
+          [machineId]
+        );
+        productsToShow = anyProductsResult.rows;
+      }
+
+      // If still no products, return no poll
+      if (productsToShow.length < 2) {
+        return res.json({
+          success: true,
+          data: {
+            poll: null,
+            products: [],
+            message: 'Not enough products in this machine for a poll',
+          },
+        });
+      }
+
+      // Create auto-generated poll using a transaction
+      const autoPollResult = await transaction(async (client) => {
+        // Deactivate any existing auto-generated polls for this machine
+        await client.query(
+          `UPDATE polls SET is_active = false, closed_at = NOW()
+           WHERE machine_id = $1 AND is_auto_generated = true AND is_active = true`,
+          [machineId]
+        );
+
+        // Create new auto-generated poll
+        const pollInsert = await client.query(
+          `INSERT INTO polls (vendor_id, machine_id, poll_question, is_active, poll_type, is_auto_generated)
+           VALUES ($1, $2, $3, true, 'performance', true)
+           RETURNING id, poll_question as question, created_at, poll_type, is_auto_generated`,
+          [machine.vendor_id, machineId, 'Which products would you like to see more of?']
+        );
+
+        const newPoll = pollInsert.rows[0];
+
+        // Insert poll options for each product
+        for (let i = 0; i < productsToShow.length; i++) {
+          const product = productsToShow[i];
+          await client.query(
+            `INSERT INTO poll_options (poll_id, option_text, image_url, product_id, display_order)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [newPoll.id, product.product_name, product.image_url, product.product_id, i + 1]
+          );
+        }
+
+        return newPoll;
+      });
+
+      poll = autoPollResult;
+    }
 
     // Get poll options (products to swipe on) with user's existing votes
     const optionsResult = await query(
@@ -220,6 +307,8 @@ router.get('/polls', verifySession, async (req, res) => {
           id: poll.id,
           question: poll.question,
           createdAt: poll.created_at,
+          pollType: poll.poll_type || 'performance',
+          isAutoGenerated: poll.is_auto_generated || false,
         },
         products: unvotedOptions,
         totalProducts: optionsResult.rows.length,

@@ -199,6 +199,19 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// Rate limiting for public endpoints (more permissive but still protected)
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 requests per minute
+  message: { success: false, message: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply rate limiting to public endpoints
+app.use('/api/stats', publicLimiter);
+app.use('/api/auth/public', publicLimiter);
+
 // Admin DB info endpoint (protected)
 app.get('/api/admin/db-info', async (req, res) => {
   const { pool } = require('./config/database');
@@ -235,6 +248,68 @@ app.get('/api/admin/db-info', async (req, res) => {
   }
 });
 
+// Admin email scheduler endpoint (protected)
+app.post('/api/admin/run-email-scheduler', async (req, res) => {
+  try {
+    // Quick inline auth check
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'No token provided' });
+    }
+
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'vendor') {
+      return res.status(403).json({ success: false, message: 'Vendor access required' });
+    }
+
+    const { runSchedulerTasks, getSchedulerStats } = require('./services/emailScheduler');
+
+    const beforeStats = await getSchedulerStats();
+    const results = await runSchedulerTasks();
+    const afterStats = await getSchedulerStats();
+
+    res.json({
+      success: true,
+      data: {
+        before: beforeStats,
+        results,
+        after: afterStats,
+      }
+    });
+  } catch (error) {
+    console.error('Email scheduler error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Admin email scheduler stats endpoint (protected)
+app.get('/api/admin/email-scheduler-stats', async (req, res) => {
+  try {
+    // Quick inline auth check
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'No token provided' });
+    }
+
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'vendor') {
+      return res.status(403).json({ success: false, message: 'Vendor access required' });
+    }
+
+    const { getSchedulerStats } = require('./services/emailScheduler');
+    const stats = await getSchedulerStats();
+
+    res.json({
+      success: true,
+      data: stats,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // API routes with auth-specific rate limiters
 const authRouter = require('./routes/auth');
 
@@ -247,7 +322,6 @@ app.use('/api/auth/customer/register', registerLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
-app.use('/api/referral', require('./routes/referral'));
 
 // 404 handler
 app.use((req, res) => {

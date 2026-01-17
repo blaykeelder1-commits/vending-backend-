@@ -203,44 +203,150 @@ const templates = {
     `,
   }),
 
-  // Referral invitation
-  referralInvite: (referrerName, referralCode) => ({
-    subject: `${referrerName} invited you to try IDDI`,
+  // Email verification - sent on registration
+  emailVerification: (userName, verificationCode) => ({
+    subject: 'Verify your IDDI account',
     html: `
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
           .container { max-width: 600px; margin: 0 auto; padding: 20px; }
           .header { background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
-          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; }
-          .button { display: inline-block; background: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-size: 16px; }
-          .code-box { background: #F3F4F6; border: 2px dashed #4F46E5; padding: 15px; text-align: center; margin: 20px 0; border-radius: 6px; }
-          .code { font-size: 24px; font-weight: bold; color: #4F46E5; letter-spacing: 2px; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+          .code-box { background: #F3F4F6; border: 2px solid #4F46E5; padding: 20px; text-align: center; margin: 25px 0; border-radius: 8px; }
+          .code { font-size: 36px; font-weight: bold; color: #4F46E5; letter-spacing: 8px; font-family: monospace; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+          .warning { color: #DC2626; font-size: 13px; margin-top: 20px; }
         </style>
       </head>
       <body>
         <div class="container">
           <div class="header">
-            <h1 style="margin: 0;">You're Invited!</h1>
+            <h1 style="margin: 0;">Verify Your Email</h1>
           </div>
           <div class="content">
-            <p><strong>${referrerName}</strong> thinks you'd love IDDI - the smart way to manage vending machines.</p>
-
-            <p>Join for free and get extended trial access when you sign up with this code:</p>
+            <p>Hi ${userName},</p>
+            <p>Welcome to IDDI! To complete your registration and secure your account, please enter the verification code below:</p>
 
             <div class="code-box">
-              <div class="code">${referralCode}</div>
+              <div class="code">${verificationCode}</div>
             </div>
 
+            <p style="text-align: center; color: #6b7280;">Enter this code on the verification page to activate your account.</p>
+
+            <p class="warning">This code expires in 15 minutes. If you didn't create an IDDI account, please ignore this email.</p>
+
+            <p style="margin-top: 30px;">Questions? Reply to this email and we'll help you out.</p>
+
+            <p>- The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // Password reset request
+  passwordReset: (userName, resetToken) => ({
+    subject: 'Reset your IDDI password',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #DC2626; color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-size: 16px; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+          .warning { background: #FEF3C7; border: 1px solid #F59E0B; padding: 15px; border-radius: 6px; margin: 20px 0; font-size: 14px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">Password Reset</h1>
+          </div>
+          <div class="content">
+            <p>Hi ${userName},</p>
+            <p>We received a request to reset your IDDI account password. Click the button below to choose a new password:</p>
+
             <center>
-              <a href="${FRONTEND_URL}/register?ref=${referralCode}" class="button">Join IDDI Free</a>
+              <a href="${FRONTEND_URL}/vendor/reset-password?token=${resetToken}" class="button">Reset Password</a>
             </center>
 
-            <p><strong>What is IDDI?</strong></p>
-            <p>IDDI helps vending operators track inventory, analyze product performance, and make smarter stocking decisions. It's free to start.</p>
+            <div class="warning">
+              <strong>This link expires in 1 hour.</strong><br>
+              If you didn't request a password reset, you can safely ignore this email. Your password will remain unchanged.
+            </div>
+
+            <p style="margin-top: 30px; font-size: 13px; color: #6b7280;">
+              If the button doesn't work, copy and paste this link into your browser:<br>
+              <span style="word-break: break-all;">${FRONTEND_URL}/vendor/reset-password?token=${resetToken}</span>
+            </p>
+
+            <p>- The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // Password changed confirmation
+  passwordChanged: (userName) => ({
+    subject: 'Your IDDI password has been changed',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #10B981; color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-size: 16px; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+          .warning { background: #FEE2E2; border: 1px solid #DC2626; padding: 15px; border-radius: 6px; margin: 20px 0; font-size: 14px; color: #DC2626; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">Password Changed</h1>
+          </div>
+          <div class="content">
+            <p>Hi ${userName},</p>
+            <p>Your IDDI account password has been successfully changed.</p>
+
+            <center>
+              <a href="${FRONTEND_URL}/vendor/login" class="button">Sign In Now</a>
+            </center>
+
+            <div class="warning">
+              <strong>Didn't make this change?</strong><br>
+              If you didn't change your password, please contact us immediately by replying to this email. Your account may have been compromised.
+            </div>
+
+            <p>- The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
           </div>
         </div>
       </body>
@@ -252,7 +358,7 @@ const templates = {
 // Send email function
 async function sendEmail(to, templateName, templateData = {}) {
   if (!resend) {
-    console.log(`[Email Mock] Would send "${templateName}" to ${to}`);
+    console.log(`[Email Mock] Would send "${templateName}" to ${to}`, templateData);
     return { success: true, mock: true };
   }
 
@@ -262,7 +368,17 @@ async function sendEmail(to, templateName, templateData = {}) {
       throw new Error(`Unknown email template: ${templateName}`);
     }
 
-    const { subject, html } = template(templateData.userName || 'there', templateData.referralCode);
+    // Handle different template signatures
+    let emailContent;
+    if (templateName === 'emailVerification') {
+      emailContent = template(templateData.userName || 'there', templateData.verificationCode);
+    } else if (templateName === 'passwordReset') {
+      emailContent = template(templateData.userName || 'there', templateData.resetToken);
+    } else {
+      emailContent = template(templateData.userName || 'there');
+    }
+
+    const { subject, html } = emailContent;
 
     const result = await resend.emails.send({
       from: FROM_EMAIL,
