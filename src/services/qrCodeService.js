@@ -6,8 +6,23 @@ const path = require('path');
 
 // Encryption settings
 const ALGORITHM = 'aes-256-cbc';
-const ENCRYPTION_KEY = Buffer.from(process.env.QR_ENCRYPTION_KEY || '12345678901234567890123456789012', 'utf8').slice(0, 32);
 const IV_LENGTH = 16;
+
+// Validate encryption key - must be exactly 32 characters for AES-256
+function getEncryptionKey() {
+  const key = process.env.QR_ENCRYPTION_KEY;
+  if (!key) {
+    console.warn('[Security] QR_ENCRYPTION_KEY not set - using insecure default. Set this in production!');
+    return Buffer.from('12345678901234567890123456789012', 'utf8');
+  }
+  if (key.length < 32) {
+    console.warn('[Security] QR_ENCRYPTION_KEY is less than 32 characters - padding to 32');
+    return Buffer.from(key.padEnd(32, '0'), 'utf8');
+  }
+  return Buffer.from(key, 'utf8').slice(0, 32);
+}
+
+const ENCRYPTION_KEY = getEncryptionKey();
 
 /**
  * Encrypt QR code data

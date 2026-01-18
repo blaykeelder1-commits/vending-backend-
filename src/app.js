@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
+const requestLogger = require('./middleware/requestLogger');
 require('dotenv').config();
 
 // Initialize Sentry for error tracking (if DSN is provided)
@@ -22,6 +23,9 @@ if (process.env.SENTRY_DSN) {
 }
 
 const app = express();
+
+// Request logging with correlation IDs
+app.use(requestLogger);
 
 // Security middleware
 app.use(helmet());
@@ -101,19 +105,48 @@ if (process.env.NODE_ENV === 'development') {
 // Serve uploaded files
 app.use('/uploads', express.static('uploads'));
 
+// Helper middleware for admin endpoints - inline token verification
+const verifyAdminToken = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'No token provided' });
+    }
+
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'vendor') {
+      return res.status(403).json({ success: false, message: 'Vendor access required' });
+    }
+
+    req.user = decoded;
+    next();
+  } catch (error) {
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+      return res.status(401).json({ success: false, message: 'Invalid or expired token' });
+    }
+    return res.status(500).json({ success: false, message: 'Authentication error' });
+  }
+};
+
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   const { pool } = require('./config/database');
-  const { cache } = require('./config/redis');
+  const { redis, cache } = require('./config/redis');
 
-  let dbStatus = 'disconnected';
-  let redisStatus = cache.isEnabled() ? 'enabled' : 'disabled';
+  const checks = {
+    database: { status: 'unknown' },
+    redis: { status: 'unknown' },
+    timestamp: new Date().toISOString(),
+  };
+
   let dbFingerprint = null;
   let machinesCount = 0;
 
+  // Check database
   try {
-    await pool.query('SELECT NOW()');
-    dbStatus = 'connected';
+    await pool.query('SELECT 1');
+    checks.database.status = 'ok';
 
     // Get DB fingerprint
     const dbUrlParsed = new URL(process.env.DATABASE_URL || '');
@@ -131,7 +164,21 @@ app.get('/api/health', async (req, res) => {
     const countResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
     machinesCount = parseInt(countResult.rows[0].count);
   } catch (error) {
-    dbStatus = 'error: ' + error.message;
+    checks.database.status = 'error';
+    checks.database.message = error.message;
+  }
+
+  // Check Redis if configured
+  if (redis) {
+    try {
+      await redis.ping();
+      checks.redis.status = 'ok';
+    } catch (error) {
+      checks.redis.status = 'error';
+      checks.redis.message = error.message;
+    }
+  } else {
+    checks.redis.status = 'not_configured';
   }
 
   const requiredEnvVars = [
@@ -143,13 +190,14 @@ app.get('/api/health', async (req, res) => {
   const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
   const envStatus = missingEnvVars.length === 0 ? 'ok' : 'missing: ' + missingEnvVars.join(', ');
 
-  res.status(200).json({
-    status: dbStatus === 'connected' && missingEnvVars.length === 0 ? 'ok' : 'degraded',
-    timestamp: new Date().toISOString(),
+  const allOk = checks.database.status === 'ok';
+  res.status(allOk ? 200 : 503).json({
+    status: allOk && missingEnvVars.length === 0 ? 'ok' : 'degraded',
+    timestamp: checks.timestamp,
     uptime: process.uptime(),
-    database: dbStatus,
+    database: checks.database,
     database_fingerprint: dbFingerprint,
-    redis: redisStatus,
+    redis: checks.redis,
     machines_count: machinesCount,
     environment_variables: envStatus,
     environment: process.env.NODE_ENV || 'development',
@@ -224,22 +272,10 @@ app.use('/api/stats', publicLimiter);
 app.use('/api/auth/public', publicLimiter);
 
 // Admin DB info endpoint (protected)
-app.get('/api/admin/db-info', async (req, res) => {
+app.get('/api/admin/db-info', verifyAdminToken, async (req, res) => {
   const { pool } = require('./config/database');
 
   try {
-    // Quick inline auth check
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'No token provided' });
-    }
-
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'vendor') {
-      return res.status(403).json({ success: false, message: 'Vendor access required' });
-    }
-
     const machinesResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
     const vendorsResult = await pool.query('SELECT COUNT(*) as count FROM users WHERE role = $1', ['vendor']);
     const lastMachineResult = await pool.query(
@@ -255,25 +291,14 @@ app.get('/api/admin/db-info', async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Error fetching DB info:', error);
+    res.status(500).json({ success: false, message: 'Error fetching database info' });
   }
 });
 
 // Admin email scheduler endpoint (protected)
-app.post('/api/admin/run-email-scheduler', async (req, res) => {
+app.post('/api/admin/run-email-scheduler', verifyAdminToken, async (req, res) => {
   try {
-    // Quick inline auth check
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'No token provided' });
-    }
-
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'vendor') {
-      return res.status(403).json({ success: false, message: 'Vendor access required' });
-    }
-
     const { runSchedulerTasks, getSchedulerStats } = require('./services/emailScheduler');
 
     const beforeStats = await getSchedulerStats();
@@ -290,25 +315,13 @@ app.post('/api/admin/run-email-scheduler', async (req, res) => {
     });
   } catch (error) {
     console.error('Email scheduler error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: 'Error running email scheduler' });
   }
 });
 
 // Admin email scheduler stats endpoint (protected)
-app.get('/api/admin/email-scheduler-stats', async (req, res) => {
+app.get('/api/admin/email-scheduler-stats', verifyAdminToken, async (req, res) => {
   try {
-    // Quick inline auth check
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'No token provided' });
-    }
-
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'vendor') {
-      return res.status(403).json({ success: false, message: 'Vendor access required' });
-    }
-
     const { getSchedulerStats } = require('./services/emailScheduler');
     const stats = await getSchedulerStats();
 
@@ -317,7 +330,8 @@ app.get('/api/admin/email-scheduler-stats', async (req, res) => {
       data: stats,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Error fetching scheduler stats:', error);
+    res.status(500).json({ success: false, message: 'Error fetching scheduler stats' });
   }
 });
 

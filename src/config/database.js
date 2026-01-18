@@ -2,10 +2,14 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 // PostgreSQL connection pool
+// Note: ssl.rejectUnauthorized: false is needed for some cloud providers (Render, Heroku)
+// For production with proper SSL certs, set DATABASE_SSL_REJECT_UNAUTHORIZED=true
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 50, // Maximum number of clients in the pool (increased for scale)
+  ssl: process.env.NODE_ENV === 'production' ? {
+    rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === 'true'
+  } : false,
+  max: parseInt(process.env.DATABASE_POOL_MAX) || 20, // Default pool size (adjustable via env)
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 20000,
 });
@@ -27,10 +31,20 @@ const query = async (text, params) => {
   try {
     const res = await pool.query(text, params);
     const duration = Date.now() - start;
-    console.log('Executed query', { text, duration, rows: res.rowCount });
+    // Only log queries in development or if they're slow (>1000ms)
+    if (process.env.NODE_ENV === 'development' || duration > 1000) {
+      // Truncate query text to avoid logging sensitive data
+      const truncatedText = text.length > 100 ? text.substring(0, 100) + '...' : text;
+      console.log('Executed query', { text: truncatedText, duration, rows: res.rowCount });
+    }
     return res;
   } catch (error) {
-    console.error('Database query error:', error);
+    // Log error without sensitive parameter data
+    console.error('Database query error:', {
+      error: error.message,
+      code: error.code,
+      query: text.substring(0, 100)
+    });
     throw error;
   }
 };

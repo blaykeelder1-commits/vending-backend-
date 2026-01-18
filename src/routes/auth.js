@@ -4,6 +4,7 @@ const Joi = require('joi');
 const crypto = require('crypto');
 const User = require('../models/User');
 const CustomerSession = require('../models/CustomerSession');
+const RefreshToken = require('../models/RefreshToken');
 const { validateQRCodeData } = require('../services/qrCodeService');
 const { query, transaction } = require('../config/database');
 const { scheduleOnboardingSequence, sendEmail } = require('../services/emailService');
@@ -24,6 +25,14 @@ const generateResetToken = () => {
 const hashToken = (token) => {
   return crypto.createHash('sha256').update(token).digest('hex');
 };
+
+// Helper function to generate refresh token
+const generateRefreshToken = () => {
+  return crypto.randomBytes(64).toString('hex');
+};
+
+// Refresh token expiration (7 days)
+const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 
 // Validation schemas
 const vendorRegisterSchema = Joi.object({
@@ -184,12 +193,20 @@ router.post('/vendor/login', async (req, res) => {
       console.error('Error updating last_login_at:', err);
     });
 
-    // Generate JWT token
+    // Generate JWT access token
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
     );
+
+    // Generate refresh token
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+    // Store refresh token
+    await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
 
     res.json({
       success: true,
@@ -202,6 +219,7 @@ router.post('/vendor/login', async (req, res) => {
           role: user.role,
         },
         token,
+        refreshToken,
       },
     });
   } catch (error) {
@@ -292,12 +310,20 @@ router.post('/vendor/verify-email', async (req, res) => {
       console.error('[Email] Error scheduling onboarding:', err);
     });
 
-    // Generate JWT token so user can proceed to dashboard
+    // Generate JWT access token so user can proceed to dashboard
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
     );
+
+    // Generate refresh token
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+    // Store refresh token
+    await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
 
     res.json({
       success: true,
@@ -310,6 +336,7 @@ router.post('/vendor/verify-email', async (req, res) => {
           role: user.role,
         },
         token,
+        refreshToken,
       },
     });
   } catch (error) {
@@ -651,12 +678,20 @@ router.post('/customer/login', async (req, res) => {
       });
     }
 
-    // Generate JWT token
+    // Generate JWT access token
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
     );
+
+    // Generate refresh token
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+    // Store refresh token
+    await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
 
     res.json({
       success: true,
@@ -669,6 +704,7 @@ router.post('/customer/login', async (req, res) => {
           role: user.role,
         },
         token,
+        refreshToken,
       },
     });
   } catch (error) {
@@ -881,6 +917,130 @@ router.get('/public/machines/by-qr/:qr_token', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error'
+    });
+  }
+});
+
+/**
+ * POST /api/auth/refresh
+ * Refresh access token using refresh token (with rotation)
+ */
+router.post('/refresh', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      refreshToken: Joi.string().required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { refreshToken } = value;
+
+    // Hash the provided refresh token to compare with stored hash
+    const tokenHash = hashToken(refreshToken);
+
+    // Find the refresh token in database
+    const storedToken = await RefreshToken.findByToken(tokenHash);
+
+    if (!storedToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired refresh token',
+        code: 'INVALID_REFRESH_TOKEN',
+      });
+    }
+
+    // Get the user associated with this refresh token
+    const user = await User.findById(storedToken.user_id);
+
+    if (!user) {
+      // Delete the orphaned refresh token
+      await RefreshToken.deleteByToken(tokenHash);
+      return res.status(401).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Delete the old refresh token (rotation - each token can only be used once)
+    await RefreshToken.deleteByToken(tokenHash);
+
+    // Generate new access token
+    const accessToken = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+    );
+
+    // Generate new refresh token (rotation)
+    const newRefreshToken = generateRefreshToken();
+    const newRefreshTokenHash = hashToken(newRefreshToken);
+    const newExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+    // Store the new refresh token
+    await RefreshToken.create(user.id, newRefreshTokenHash, newExpiresAt);
+
+    console.log(`[Auth] Token refreshed for user ${user.email}`);
+
+    res.json({
+      success: true,
+      message: 'Token refreshed successfully',
+      data: {
+        accessToken,
+        refreshToken: newRefreshToken,
+        expiresIn: process.env.JWT_EXPIRES_IN || '1h',
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          role: user.role,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error refreshing token',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/logout
+ * Logout and invalidate refresh token
+ */
+router.post('/logout', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      refreshToken: Joi.string().optional(),
+    });
+
+    const { value } = schema.validate(req.body);
+    const { refreshToken } = value;
+
+    if (refreshToken) {
+      // Delete the specific refresh token
+      const tokenHash = hashToken(refreshToken);
+      await RefreshToken.deleteByToken(tokenHash);
+    }
+
+    // If user wants to logout from all devices, they can use /logout-all endpoint
+
+    res.json({
+      success: true,
+      message: 'Logged out successfully',
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error logging out',
     });
   }
 });
