@@ -2,12 +2,16 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 const crypto = require('crypto');
+const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 const CustomerSession = require('../models/CustomerSession');
 const RefreshToken = require('../models/RefreshToken');
 const { validateQRCodeData } = require('../services/qrCodeService');
 const { query, transaction } = require('../config/database');
 const { scheduleOnboardingSequence, sendEmail } = require('../services/emailService');
+
+// Initialize Google OAuth client
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const router = express.Router();
 
@@ -78,8 +82,11 @@ router.post('/vendor/register', async (req, res) => {
 
     const { email, password, fullName } = value;
 
+    // Normalize email
+    const normalizedEmail = email.toLowerCase().trim();
+
     // Create vendor user
-    const user = await User.createVendor({ email, password, fullName });
+    const user = await User.createVendor({ email: normalizedEmail, password, fullName });
 
     // Generate verification code (6 digits, expires in 15 minutes)
     const verificationCode = generateVerificationCode();
@@ -227,6 +234,135 @@ router.post('/vendor/login', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error logging in',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/vendor/google
+ * Login or register vendor with Google OAuth
+ */
+router.post('/vendor/google', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      credential: Joi.string().required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { credential } = value;
+
+    // Verify Google ID token
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (googleError) {
+      console.error('Google token verification failed:', googleError);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid Google credential',
+      });
+    }
+
+    const { sub: googleId, email, name, picture } = payload;
+
+    // Check if user exists by Google ID
+    let user = await User.findByGoogleId(googleId);
+
+    if (!user) {
+      // Check if user exists by email (might have registered with email/password)
+      const existingUser = await User.findByEmail(email);
+
+      if (existingUser) {
+        // If existing user is a vendor, link Google account
+        if (existingUser.role === 'vendor') {
+          await User.linkGoogleAccount(existingUser.id, {
+            googleId,
+            avatarUrl: picture,
+          });
+          user = await User.findById(existingUser.id);
+        } else {
+          return res.status(400).json({
+            success: false,
+            message: 'This email is registered as a customer account',
+          });
+        }
+      } else {
+        // Create new vendor user from Google
+        user = await User.createVendorFromGoogle({
+          googleId,
+          email,
+          fullName: name,
+          avatarUrl: picture,
+        });
+
+        // Schedule onboarding emails for new users
+        scheduleOnboardingSequence(user.id, email, name).catch(err => {
+          console.error('[Email] Error scheduling onboarding:', err);
+        });
+      }
+    }
+
+    // Verify user is a vendor
+    if (user.role !== 'vendor') {
+      return res.status(403).json({
+        success: false,
+        message: 'Google sign-in is only available for vendor accounts',
+      });
+    }
+
+    // Update last login timestamp
+    query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(err => {
+      console.error('Error updating last_login_at:', err);
+    });
+
+    // Generate JWT access token
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+    );
+
+    // Generate refresh token
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+    // Store refresh token
+    await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
+
+    console.log(`[Auth] Google login successful for ${email}`);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          role: user.role,
+          avatarUrl: user.avatar_url,
+        },
+        token,
+        refreshToken,
+      },
+    });
+  } catch (error) {
+    console.error('Google OAuth error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing Google sign-in',
     });
   }
 });

@@ -11,6 +11,9 @@ class User {
    */
   static async createVendor({ email, password, fullName }) {
     try {
+      // Normalize email to prevent case-sensitivity issues
+      const normalizedEmail = email.toLowerCase().trim();
+
       // Hash password
       const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
@@ -18,7 +21,7 @@ class User {
         `INSERT INTO users (email, password_hash, role, full_name)
          VALUES ($1, $2, $3, $4)
          RETURNING id, email, role, full_name, created_at`,
-        [email, passwordHash, 'vendor', fullName]
+        [normalizedEmail, passwordHash, 'vendor', fullName]
       );
 
       return result.rows[0];
@@ -38,6 +41,9 @@ class User {
    */
   static async createCustomerWithPassword({ email, password, fullName }) {
     try {
+      // Normalize email to prevent case-sensitivity issues
+      const normalizedEmail = email.toLowerCase().trim();
+
       // Hash password
       const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
@@ -45,7 +51,7 @@ class User {
         `INSERT INTO users (email, password_hash, role, full_name)
          VALUES ($1, $2, $3, $4)
          RETURNING id, email, role, full_name, created_at`,
-        [email, passwordHash, 'customer', fullName]
+        [normalizedEmail, passwordHash, 'customer', fullName]
       );
 
       return result.rows[0];
@@ -88,9 +94,12 @@ class User {
    * @returns {object|null} - User object or null
    */
   static async findByEmail(email) {
+    // Normalize email to ensure consistent lookups
+    const normalizedEmail = email.toLowerCase().trim();
+
     const result = await query(
       'SELECT * FROM users WHERE email = $1',
-      [email]
+      [normalizedEmail]
     );
 
     return result.rows[0] || null;
@@ -133,6 +142,62 @@ class User {
        WHERE id = $3
        RETURNING id, email, role, full_name, payment_method, payment_username`,
       [paymentMethod, paymentUsername, userId]
+    );
+
+    return result.rows[0];
+  }
+
+  /**
+   * Find user by Google ID
+   * @param {string} googleId - Google's unique user ID
+   * @returns {object|null} - User object or null
+   */
+  static async findByGoogleId(googleId) {
+    const result = await query(
+      'SELECT * FROM users WHERE google_id = $1',
+      [googleId]
+    );
+
+    return result.rows[0] || null;
+  }
+
+  /**
+   * Create a new vendor user from Google OAuth
+   * @param {object} userData - Google user data
+   * @returns {object} - Created user (without password)
+   */
+  static async createVendorFromGoogle({ googleId, email, fullName, avatarUrl }) {
+    try {
+      const result = await query(
+        `INSERT INTO users (email, role, full_name, google_id, auth_provider, avatar_url, email_verified)
+         VALUES ($1, $2, $3, $4, $5, $6, true)
+         RETURNING id, email, role, full_name, google_id, auth_provider, avatar_url, created_at`,
+        [email, 'vendor', fullName, googleId, 'google', avatarUrl]
+      );
+
+      return result.rows[0];
+    } catch (error) {
+      if (error.code === '23505') {
+        // Unique violation - email or google_id already exists
+        throw new Error('Email already exists');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Link Google account to existing user
+   * @param {number} userId - User ID
+   * @param {object} googleData - Google account data
+   * @returns {object} - Updated user
+   */
+  static async linkGoogleAccount(userId, { googleId, avatarUrl }) {
+    const result = await query(
+      `UPDATE users
+       SET google_id = $1, avatar_url = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING id, email, role, full_name, google_id, auth_provider, avatar_url`,
+      [googleId, avatarUrl, userId]
     );
 
     return result.rows[0];
