@@ -63,26 +63,26 @@ app.use(cors(corsOptions));
 // General rate limiting for all API routes
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500, // Increased for better UX
   message: { success: false, message: 'Too many requests from this IP, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use('/api/', limiter);
 
-// Strict rate limiting for login endpoints (5 requests per minute)
+// Rate limiting for login endpoints (20 requests per minute)
 const loginLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 5,
+  max: 20, // Increased for better UX
   message: { success: false, message: 'Too many login attempts, please try again in a minute.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// Strict rate limiting for registration endpoints (3 requests per hour)
+// Rate limiting for registration endpoints (10 requests per hour)
 const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 3,
+  max: 10, // Increased for testing
   message: { success: false, message: 'Too many registration attempts, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
