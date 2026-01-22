@@ -168,11 +168,14 @@ class User {
    */
   static async createVendorFromGoogle({ googleId, email, fullName, avatarUrl }) {
     try {
+      // Normalize email to prevent case-sensitivity issues
+      const normalizedEmail = email.toLowerCase().trim();
+
       const result = await query(
         `INSERT INTO users (email, role, full_name, google_id, auth_provider, avatar_url, email_verified)
          VALUES ($1, $2, $3, $4, $5, $6, true)
          RETURNING id, email, role, full_name, google_id, auth_provider, avatar_url, created_at`,
-        [email, 'vendor', fullName, googleId, 'google', avatarUrl]
+        [normalizedEmail, 'vendor', fullName, googleId, 'google', avatarUrl]
       );
 
       return result.rows[0];
