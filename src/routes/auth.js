@@ -341,7 +341,7 @@ router.post('/vendor/google', async (req, res) => {
     // Store refresh token
     await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
 
-    console.log(`[Auth] Google login successful for ${email}`);
+    // DEBUG ONLY: console.log(`[Auth] Google login successful for ${email}`);
 
     res.json({
       success: true,
@@ -622,7 +622,7 @@ router.post('/vendor/forgot-password', async (req, res) => {
       console.error('[Email] Error sending password reset email:', err);
     });
 
-    console.log(`[Auth] Password reset requested for ${email}`);
+    // DEBUG ONLY: console.log(`[Auth] Password reset requested for ${email}`);
 
     res.json({
       success: true,
@@ -694,7 +694,7 @@ router.post('/vendor/reset-password', async (req, res) => {
       [passwordHash, user.id]
     );
 
-    console.log(`[Auth] Password reset successful for ${user.email}`);
+    // DEBUG ONLY: console.log(`[Auth] Password reset successful for ${user.email}`);
 
     // Send confirmation email
     sendEmail(user.email, 'passwordChanged', {
@@ -1121,7 +1121,7 @@ router.post('/refresh', async (req, res) => {
     // Store the new refresh token
     await RefreshToken.create(user.id, newRefreshTokenHash, newExpiresAt);
 
-    console.log(`[Auth] Token refreshed for user ${user.email}`);
+    // DEBUG ONLY: console.log(`[Auth] Token refreshed for user ${user.email}`);
 
     res.json({
       success: true,

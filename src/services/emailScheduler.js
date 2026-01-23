@@ -34,7 +34,7 @@ async function processScheduledEmails() {
       return results;
     }
 
-    console.log(`[EmailScheduler] Processing ${pendingEmails.length} scheduled emails`);
+    // DEBUG ONLY: console.log(`[EmailScheduler] Processing ${pendingEmails.length} scheduled emails`);
 
     for (const email of pendingEmails) {
       try {
@@ -62,7 +62,7 @@ async function processScheduledEmails() {
           `, [email.user_id, email.email, email.template_name, email.template_name, sendResult.id || null]);
 
           results.sent++;
-          console.log(`[EmailScheduler] Sent "${email.template_name}" to ${email.email}`);
+          // DEBUG ONLY: console.log(`[EmailScheduler] Sent "${email.template_name}" to ${email.email}`);
         } else {
           throw new Error(sendResult.error || 'Unknown send error');
         }
@@ -82,15 +82,15 @@ async function processScheduledEmails() {
 
         results.failed++;
         results.errors.push({ id: email.id, email: email.email, error: error.message });
-        console.error(`[EmailScheduler] Failed to send "${email.template_name}" to ${email.email}:`, error.message);
+        // DEBUG ONLY: console.error(`[EmailScheduler] Failed to send "${email.template_name}" to ${email.email}:`, error.message);
       }
     }
 
-    console.log(`[EmailScheduler] Completed: ${results.sent} sent, ${results.failed} failed`);
+    // DEBUG ONLY: console.log(`[EmailScheduler] Completed: ${results.sent} sent, ${results.failed} failed`);
     return results;
 
   } catch (error) {
-    console.error('[EmailScheduler] Error processing scheduled emails:', error);
+    // DEBUG ONLY: console.error('[EmailScheduler] Error processing scheduled emails:', error);
     throw error;
   }
 }
@@ -140,12 +140,12 @@ async function scheduleReEngagementEmails() {
 
         results.scheduled++;
       } catch (error) {
-        console.error(`[EmailScheduler] Failed to schedule re-engagement for user ${user.id}:`, error.message);
+        // DEBUG ONLY: console.error(`[EmailScheduler] Failed to schedule re-engagement for user ${user.id}:`, error.message);
       }
     }
 
     if (results.scheduled > 0) {
-      console.log(`[EmailScheduler] Scheduled ${results.scheduled} re-engagement emails`);
+      // DEBUG ONLY: console.log(`[EmailScheduler] Scheduled ${results.scheduled} re-engagement emails`);
     }
 
     return results;
@@ -167,12 +167,12 @@ async function cleanupOldEmails() {
     `);
 
     if (result.rowCount > 0) {
-      console.log(`[EmailScheduler] Cleaned up ${result.rowCount} old scheduled emails`);
+      // DEBUG ONLY: console.log(`[EmailScheduler] Cleaned up ${result.rowCount} old scheduled emails`);
     }
 
     return { deleted: result.rowCount };
   } catch (error) {
-    console.error('[EmailScheduler] Error cleaning up old emails:', error);
+    // DEBUG ONLY: console.error('[EmailScheduler] Error cleaning up old emails:', error);
     throw error;
   }
 }
@@ -194,7 +194,7 @@ async function getSchedulerStats() {
 
     return result.rows[0];
   } catch (error) {
-    console.error('[EmailScheduler] Error getting stats:', error);
+    // DEBUG ONLY: console.error('[EmailScheduler] Error getting stats:', error);
     throw error;
   }
 }
@@ -203,7 +203,7 @@ async function getSchedulerStats() {
  * Run all scheduler tasks (call this from cron)
  */
 async function runSchedulerTasks() {
-  console.log('[EmailScheduler] Starting scheduled tasks...');
+  // DEBUG ONLY: console.log('[EmailScheduler] Starting scheduled tasks...');
 
   const results = {
     timestamp: new Date().toISOString(),
@@ -222,10 +222,10 @@ async function runSchedulerTasks() {
     // 3. Clean up old records
     results.cleanup = await cleanupOldEmails();
 
-    console.log('[EmailScheduler] Completed all tasks:', results);
+    // DEBUG ONLY: console.log('[EmailScheduler] Completed all tasks:', results);
     return results;
   } catch (error) {
-    console.error('[EmailScheduler] Error running tasks:', error);
+    // DEBUG ONLY: console.error('[EmailScheduler] Error running tasks:', error);
     results.error = error.message;
     return results;
   }

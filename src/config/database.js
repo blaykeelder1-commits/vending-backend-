@@ -20,7 +20,8 @@ pool.on('connect', () => {
 });
 
 pool.on('error', (err) => {
-  console.error('Unexpected error on idle PostgreSQL client', err);
+  // Log error without potentially sensitive connection details
+  console.error('Unexpected error on idle PostgreSQL client:', err.message);
   // Don't exit - let the pool recover or individual queries fail gracefully
   // The pool will automatically attempt to reconnect on next query
 });
