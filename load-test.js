@@ -19,7 +19,6 @@ const DURATION_SECONDS = parseInt(process.argv[4]) || 30;
 // Test endpoints (public ones that don't require auth)
 const ENDPOINTS = [
   { method: 'GET', path: '/api/health' },
-  { method: 'GET', path: '/api/stats/summary' },
 ];
 
 // Metrics
