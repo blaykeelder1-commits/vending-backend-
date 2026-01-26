@@ -68,4 +68,70 @@ const cache = {
   },
 };
 
-module.exports = { redis, cache };
+/**
+ * Rate limit store for express-rate-limit using Upstash Redis
+ * Falls back to memory store if Redis is not configured
+ */
+class RedisRateLimitStore {
+  constructor(windowMs) {
+    this.windowMs = windowMs;
+    this.prefix = 'rl:';
+  }
+
+  async increment(key) {
+    if (!redis) {
+      // Fallback handled by express-rate-limit's default memory store
+      return { totalHits: 0, resetTime: new Date(Date.now() + this.windowMs) };
+    }
+
+    const redisKey = this.prefix + key;
+    try {
+      const [[, totalHits], [, ttl]] = await redis.pipeline()
+        .incr(redisKey)
+        .pttl(redisKey)
+        .exec();
+
+      // Set expiry on first hit
+      if (ttl === -1) {
+        await redis.pexpire(redisKey, this.windowMs);
+      }
+
+      const resetTime = new Date(Date.now() + (ttl > 0 ? ttl : this.windowMs));
+      return { totalHits, resetTime };
+    } catch (error) {
+      console.error('Redis rate limit error:', error.message);
+      return { totalHits: 0, resetTime: new Date(Date.now() + this.windowMs) };
+    }
+  }
+
+  async decrement(key) {
+    if (!redis) return;
+    try {
+      await redis.decr(this.prefix + key);
+    } catch (error) {
+      console.error('Redis rate limit decrement error:', error.message);
+    }
+  }
+
+  async resetKey(key) {
+    if (!redis) return;
+    try {
+      await redis.del(this.prefix + key);
+    } catch (error) {
+      console.error('Redis rate limit reset error:', error.message);
+    }
+  }
+}
+
+/**
+ * Create a rate limit store - uses Redis if available, otherwise returns undefined
+ * (express-rate-limit will use its default memory store)
+ */
+function createRateLimitStore(windowMs) {
+  if (redis) {
+    return new RedisRateLimitStore(windowMs);
+  }
+  return undefined;
+}
+
+module.exports = { redis, cache, createRateLimitStore };

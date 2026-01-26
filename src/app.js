@@ -6,6 +6,7 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
 const requestLogger = require('./middleware/requestLogger');
+const { createRateLimitStore } = require('./config/redis');
 require('dotenv').config();
 
 // Initialize Sentry for error tracking (if DSN is provided)
@@ -27,8 +28,23 @@ const app = express();
 // Request logging with correlation IDs
 app.use(requestLogger);
 
-// Security middleware
-app.use(helmet());
+// Security middleware with CSP
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://accounts.google.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"],
+      connectSrc: ["'self'", process.env.FRONTEND_URL, "https://accounts.google.com"].filter(Boolean),
+      frameSrc: ["'self'", "https://accounts.google.com"],
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null,
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Required for some image loading scenarios
+}));
 
 // CORS configuration
 const corsOptions = {
@@ -60,32 +76,38 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// General rate limiting for all API routes
+// General rate limiting for all API routes (uses Redis if available)
+const generalWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500, // Increased for better UX
+  windowMs: generalWindowMs,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
   message: { success: false, message: 'Too many requests from this IP, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  store: createRateLimitStore(generalWindowMs),
 });
 app.use('/api/', limiter);
 
 // Rate limiting for login endpoints (20 requests per minute)
+const loginWindowMs = 60 * 1000;
 const loginLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 20, // Increased for better UX
+  windowMs: loginWindowMs,
+  max: 20,
   message: { success: false, message: 'Too many login attempts, please try again in a minute.' },
   standardHeaders: true,
   legacyHeaders: false,
+  store: createRateLimitStore(loginWindowMs),
 });
 
 // Rate limiting for registration endpoints (10 requests per hour)
+const registerWindowMs = 60 * 60 * 1000;
 const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 10, // Increased for testing
+  windowMs: registerWindowMs,
+  max: 10,
   message: { success: false, message: 'Too many registration attempts, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  store: createRateLimitStore(registerWindowMs),
 });
 
 // Body parsing middleware
@@ -259,12 +281,14 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // Rate limiting for public endpoints (more permissive but still protected)
+const publicWindowMs = 60 * 1000;
 const publicLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
+  windowMs: publicWindowMs,
   max: 30, // 30 requests per minute
   message: { success: false, message: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  store: createRateLimitStore(publicWindowMs),
 });
 
 // Apply rate limiting to public endpoints
