@@ -1,6 +1,7 @@
 const app = require('./app');
 const { pool } = require('./config/database');
 const cron = require('node-cron');
+const rankingService = require('./services/rankingService');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 5000;
@@ -64,8 +65,9 @@ async function startServer() {
   });
 }
 
-// Clean up expired sessions every hour
+// Hourly maintenance tasks
 cron.schedule('0 * * * *', async () => {
+  // Clean up expired sessions
   try {
     const result = await pool.query(
       'DELETE FROM customer_sessions WHERE expires_at < NOW()'
@@ -73,6 +75,14 @@ cron.schedule('0 * * * *', async () => {
     console.log(`[Cron] Cleaned up ${result.rowCount} expired sessions`);
   } catch (error) {
     console.error('[Cron] Session cleanup error:', error.message);
+  }
+
+  // Recalculate Top 50 product rankings
+  try {
+    const rankingResult = await rankingService.recalculateAllRankings();
+    console.log(`[Cron] Top 50 rankings recalculated: ${rankingResult.productsRanked} products ranked`);
+  } catch (error) {
+    console.error('[Cron] Ranking recalculation error:', error.message);
   }
 });
 

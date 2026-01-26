@@ -3,6 +3,7 @@ const Joi = require('joi');
 const { query, transaction } = require('../config/database');
 const { protect, restrictTo } = require('../middleware/auth');
 const { generateQRCodeData, generateQRCodeDataURL } = require('../services/qrCodeService');
+const rankingService = require('../services/rankingService');
 
 const router = express.Router();
 
@@ -1009,35 +1010,19 @@ router.get('/performance-comparison', async (req, res) => {
 /**
  * GET /api/vendor/top-products
  * Get global Top 50 products across all vendors
+ * Uses cached rankings from hourly cron job, falls back to live calculation
  */
 router.get('/top-products', async (req, res) => {
   try {
-    const result = await query(
-      `SELECT
-        p.id as product_id,
-        p.product_name,
-        p.image_url,
-        COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as yes_count,
-        COUNT(CASE WHEN mp.is_performing = false THEN 1 END) as no_count,
-        COUNT(mp.id) as total_machines,
-        ROUND(
-          COUNT(CASE WHEN mp.is_performing = true THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN mp.is_performing IS NOT NULL THEN 1 END), 0),
-          1
-        ) as performance_percentage
-       FROM products p
-       JOIN machine_products mp ON p.id = mp.product_id
-       WHERE mp.is_performing IS NOT NULL
-       GROUP BY p.id, p.product_name, p.image_url
-       HAVING COUNT(CASE WHEN mp.is_performing IS NOT NULL THEN 1 END) >= 1
-       ORDER BY yes_count DESC, performance_percentage DESC
-       LIMIT 50`
-    );
+    const result = await rankingService.getTopProducts(50);
 
     res.json({
       success: true,
       data: {
-        topProducts: result.rows,
-        count: result.rows.length,
+        topProducts: result.products,
+        count: result.products.length,
+        lastUpdated: result.lastUpdated,
+        fromCache: result.fromCache,
       },
     });
   } catch (error) {
