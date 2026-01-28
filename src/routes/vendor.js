@@ -1553,6 +1553,54 @@ router.get('/polls/:pollId/results', async (req, res) => {
 });
 
 // ========================================
+// POLL SUMMARY (AGGREGATED ACROSS ALL MACHINES)
+// ========================================
+
+/**
+ * GET /api/vendor/poll-summary
+ * Get aggregated poll results across ALL vendor machines, grouped by product name
+ */
+router.get('/poll-summary', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const result = await query(
+      `SELECT
+        po.option_text AS product_name,
+        COUNT(CASE WHEN pv.vote_type = 'like' THEN 1 END)::int AS likes,
+        COUNT(CASE WHEN pv.vote_type = 'dislike' THEN 1 END)::int AS dislikes,
+        COUNT(pv.id)::int AS total_votes,
+        COUNT(DISTINCT p.machine_id)::int AS machines_polled,
+        CASE WHEN COUNT(pv.id) > 0
+          THEN ROUND((COUNT(CASE WHEN pv.vote_type = 'like' THEN 1 END)::numeric / COUNT(pv.id)) * 100)
+          ELSE 0
+        END AS approval_rate
+       FROM poll_options po
+       JOIN polls p ON po.poll_id = p.id
+       LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id
+       WHERE p.vendor_id = $1
+       GROUP BY po.option_text
+       ORDER BY approval_rate DESC, total_votes DESC`,
+      [vendorId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        products: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching poll summary:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching poll summary',
+    });
+  }
+});
+
+// ========================================
 // PRODUCT REDISTRIBUTION ROUTES
 // ========================================
 
