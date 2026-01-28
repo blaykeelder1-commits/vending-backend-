@@ -183,7 +183,7 @@ router.post('/vendor/login', async (req, res) => {
 
     // Find vendor user with verification status
     const userResult = await query(
-      `SELECT id, email, password_hash, full_name, role, email_verified
+      `SELECT id, email, password_hash, full_name, role, email_verified, email_verification_code
        FROM users WHERE email = $1`,
       [email.toLowerCase().trim()]
     );
@@ -207,26 +207,20 @@ router.post('/vendor/login', async (req, res) => {
       });
     }
 
-    // Block login if email not verified
-    // Auto-verify legacy accounts (no verification code = created before verification existed)
-    if (!user.email_verified) {
-      const codeResult = await query(
-        `SELECT email_verification_code FROM users WHERE id = $1`,
-        [user.id]
-      );
-      const hasVerificationCode = !!codeResult.rows[0]?.email_verification_code;
+    // Block login if email not verified AND a verification code exists
+    // (no code = legacy account created before verification was enforced)
+    if (!user.email_verified && user.email_verification_code) {
+      return res.status(403).json({
+        success: false,
+        message: 'Please verify your email address before logging in.',
+        code: 'EMAIL_NOT_VERIFIED',
+        data: { email: user.email },
+      });
+    }
 
-      if (!hasVerificationCode) {
-        // Legacy account — no code was ever generated, auto-verify and allow login
-        await query('UPDATE users SET email_verified = true WHERE id = $1', [user.id]);
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'Please verify your email address before logging in.',
-          code: 'EMAIL_NOT_VERIFIED',
-          data: { email: user.email },
-        });
-      }
+    // Auto-verify legacy accounts that have no verification code
+    if (!user.email_verified && !user.email_verification_code) {
+      await query('UPDATE users SET email_verified = true WHERE id = $1', [user.id]);
     }
 
     // Update last login timestamp
