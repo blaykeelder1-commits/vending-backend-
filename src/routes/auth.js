@@ -208,13 +208,26 @@ router.post('/vendor/login', async (req, res) => {
     }
 
     // Block login if email not verified
+    // Auto-verify legacy accounts (created before verification was enforced)
     if (!user.email_verified) {
-      return res.status(403).json({
-        success: false,
-        message: 'Please verify your email address before logging in.',
-        code: 'EMAIL_NOT_VERIFIED',
-        data: { email: user.email },
-      });
+      const createdResult = await query(
+        `SELECT created_at FROM users WHERE id = $1`,
+        [user.id]
+      );
+      const createdAt = createdResult.rows[0]?.created_at;
+      const verificationEnforcedDate = new Date('2026-01-27T00:00:00Z');
+
+      if (createdAt && new Date(createdAt) < verificationEnforcedDate) {
+        // Legacy account — auto-verify and allow login
+        await query('UPDATE users SET email_verified = true WHERE id = $1', [user.id]);
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'Please verify your email address before logging in.',
+          code: 'EMAIL_NOT_VERIFIED',
+          data: { email: user.email },
+        });
+      }
     }
 
     // Update last login timestamp
