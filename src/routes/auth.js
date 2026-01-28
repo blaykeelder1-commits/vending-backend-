@@ -88,46 +88,66 @@ router.post('/vendor/register', async (req, res) => {
     // Create vendor user
     const user = await User.createVendor({ email: normalizedEmail, password, fullName });
 
-    // Auto-verify email (email service not configured for public delivery yet)
+    // Generate verification code
+    const verificationCode = generateVerificationCode();
+    const verificationExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    // Store verification code
     await query(
-      `UPDATE users SET email_verified = true WHERE id = $1`,
-      [user.id]
+      `UPDATE users SET
+         email_verification_code = $1,
+         email_verification_expires = $2
+       WHERE id = $3`,
+      [verificationCode, verificationExpires, user.id]
     );
 
-    // Generate JWT access token so user can proceed immediately
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
-    );
+    // Attempt to send verification email (with retry)
+    // Resend sandbox (onboarding@resend.dev) silently drops emails to non-owners,
+    // so treat it as not sent unless a custom domain is configured
+    const fromEmail = process.env.RESEND_FROM_EMAIL || '';
+    const isSandbox = fromEmail.includes('onboarding@resend.dev') || !process.env.RESEND_API_KEY;
 
-    // Generate refresh token
-    const refreshToken = generateRefreshToken();
-    const refreshTokenHash = hashToken(refreshToken);
-    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+    let emailSent = false;
+    if (!isSandbox) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const result = await sendEmail(normalizedEmail, 'emailVerification', {
+            userName: fullName,
+            verificationCode,
+          });
+          if (result.success && !result.mock) {
+            emailSent = true;
+          }
+          break;
+        } catch (err) {
+          console.error(`[Email] Verification email attempt ${attempt} failed:`, err.message);
+        }
+      }
+    }
 
-    // Store refresh token
-    await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
+    // Build response — include code if email delivery failed so user isn't locked out
+    const responseData = {
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.full_name,
+        role: user.role,
+      },
+      emailVerified: false,
+      emailSent,
+    };
 
-    // Schedule onboarding emails (best-effort, won't block registration)
-    scheduleOnboardingSequence(user.id, email, fullName).catch(err => {
-      console.error('[Email] Error scheduling onboarding:', err);
-    });
+    // If email couldn't be delivered, include the code so the frontend can show it
+    if (!emailSent) {
+      responseData.verificationCode = verificationCode;
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Account created successfully!',
-      data: {
-        user: {
-          id: user.id,
-          email: user.email,
-          fullName: user.full_name,
-          role: user.role,
-        },
-        token,
-        refreshToken,
-        emailVerified: true,
-      },
+      message: emailSent
+        ? 'Account created! Please check your email for the verification code.'
+        : 'Account created! Email delivery is not yet configured — use the code shown on screen to verify.',
+      data: responseData,
     });
   } catch (error) {
     console.error('Vendor registration error:', error);
@@ -187,10 +207,13 @@ router.post('/vendor/login', async (req, res) => {
       });
     }
 
-    // Auto-verify if not yet verified (legacy accounts)
+    // Block login if email not verified
     if (!user.email_verified) {
-      query('UPDATE users SET email_verified = true WHERE id = $1', [user.id]).catch(err => {
-        console.error('Error auto-verifying user:', err);
+      return res.status(403).json({
+        success: false,
+        message: 'Please verify your email address before logging in.',
+        code: 'EMAIL_NOT_VERIFIED',
+        data: { email: user.email },
       });
     }
 
@@ -542,31 +565,42 @@ router.post('/vendor/resend-verification', async (req, res) => {
       [verificationCode, verificationExpires, user.id]
     );
 
-    // Send verification email with retry
+    // Check if using sandbox (can't deliver to arbitrary emails)
+    const fromEmail = process.env.RESEND_FROM_EMAIL || '';
+    const isSandbox = fromEmail.includes('onboarding@resend.dev') || !process.env.RESEND_API_KEY;
+
     let emailSent = false;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        await sendEmail(email, 'emailVerification', {
-          userName: user.full_name,
-          verificationCode,
-        });
-        emailSent = true;
-        break;
-      } catch (err) {
-        console.error(`[Email] Resend verification attempt ${attempt} failed:`, err.message);
+    if (!isSandbox) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const result = await sendEmail(email, 'emailVerification', {
+            userName: user.full_name,
+            verificationCode,
+          });
+          if (result.success && !result.mock) {
+            emailSent = true;
+          }
+          break;
+        } catch (err) {
+          console.error(`[Email] Resend verification attempt ${attempt} failed:`, err.message);
+        }
       }
     }
 
+    const responseData = {
+      message: emailSent
+        ? 'A new verification code has been sent to your email.'
+        : 'Email delivery is being set up. Use the code shown below.',
+      emailSent,
+    };
+
     if (!emailSent) {
-      return res.status(502).json({
-        success: false,
-        message: 'Unable to send verification email. Please try again later.',
-      });
+      responseData.verificationCode = verificationCode;
     }
 
     res.json({
       success: true,
-      message: 'A new verification code has been sent to your email.',
+      ...responseData,
     });
   } catch (error) {
     console.error('Resend verification error:', error);
