@@ -12,6 +12,7 @@ const pool = new Pool({
   max: parseInt(process.env.DATABASE_POOL_MAX) || 40, // Default pool size for 500+ users
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 20000,
+  statement_timeout: parseInt(process.env.DATABASE_STATEMENT_TIMEOUT) || 30000, // 30s query timeout
 });
 
 // Test database connection
@@ -25,6 +26,14 @@ pool.on('error', (err) => {
   // Don't exit - let the pool recover or individual queries fail gracefully
   // The pool will automatically attempt to reconnect on next query
 });
+
+// Log pool exhaustion warnings
+setInterval(() => {
+  const { totalCount, idleCount, waitingCount } = pool;
+  if (waitingCount > 0) {
+    console.warn(`[DB Pool] Waiting: ${waitingCount}, Active: ${totalCount - idleCount}, Idle: ${idleCount}, Total: ${totalCount}`);
+  }
+}, 10000);
 
 // Query helper function
 const query = async (text, params) => {

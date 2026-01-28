@@ -6,6 +6,9 @@ require('dotenv').config();
 
 const PORT = process.env.PORT || 5000;
 
+let server = null;
+let cronRunning = false;
+
 // Validate critical environment variables at startup
 function validateEnvironment() {
   const errors = [];
@@ -55,7 +58,7 @@ async function startServer() {
   }
 
   // Start server regardless of database connection
-  app.listen(PORT, () => {
+  server = app.listen(PORT, () => {
     console.log(`✓ Server running on port ${PORT}`);
     console.log(`✓ Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`✓ Health check: http://localhost:${PORT}/api/health`);
@@ -65,50 +68,88 @@ async function startServer() {
   });
 }
 
-// Hourly maintenance tasks
+// Hourly maintenance tasks with concurrency guard
 cron.schedule('0 * * * *', async () => {
-  // Clean up expired sessions
-  try {
-    const result = await pool.query(
-      'DELETE FROM customer_sessions WHERE expires_at < NOW()'
-    );
-    console.log(`[Cron] Cleaned up ${result.rowCount} expired sessions`);
-  } catch (error) {
-    console.error('[Cron] Session cleanup error:', error.message);
+  if (cronRunning) {
+    console.log('[Cron] Previous run still active, skipping');
+    return;
   }
+  cronRunning = true;
 
-  // Recalculate Top 50 product rankings
   try {
-    const rankingResult = await rankingService.recalculateAllRankings();
-    console.log(`[Cron] Top 50 rankings recalculated: ${rankingResult.productsRanked} products ranked`);
-  } catch (error) {
-    console.error('[Cron] Ranking recalculation error:', error.message);
+    // Clean up expired sessions
+    try {
+      const result = await pool.query(
+        'DELETE FROM customer_sessions WHERE expires_at < NOW()'
+      );
+      console.log(`[Cron] Cleaned up ${result.rowCount} expired sessions`);
+    } catch (error) {
+      console.error('[Cron] Session cleanup error:', error.message);
+      if (process.env.SENTRY_DSN) {
+        try { require('@sentry/node').captureException(error); } catch (_) {}
+      }
+    }
+
+    // Recalculate Top 50 product rankings
+    try {
+      const rankingResult = await rankingService.recalculateAllRankings();
+      console.log(`[Cron] Top 50 rankings recalculated: ${rankingResult.productsRanked} products ranked`);
+    } catch (error) {
+      console.error('[Cron] Ranking recalculation error:', error.message);
+      if (process.env.SENTRY_DSN) {
+        try { require('@sentry/node').captureException(error); } catch (_) {}
+      }
+    }
+  } finally {
+    cronRunning = false;
   }
 });
 
-// Handle uncaught exceptions
+// Graceful shutdown helper
+const SHUTDOWN_TIMEOUT = 30000; // 30 seconds
+
+async function gracefulShutdown(signal) {
+  console.log(`${signal} received, starting graceful shutdown...`);
+
+  // Stop accepting new connections
+  if (server) {
+    server.close(() => {
+      console.log('HTTP server closed, no longer accepting connections');
+    });
+  }
+
+  // Force exit after timeout
+  const forceExit = setTimeout(() => {
+    console.error('Graceful shutdown timed out, forcing exit');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT);
+  forceExit.unref();
+
+  // Drain DB pool
+  try {
+    await pool.end();
+    console.log('Database pool drained');
+  } catch (err) {
+    console.error('Error draining database pool:', err.message);
+  }
+
+  process.exit(0);
+}
+
+// Handle uncaught exceptions — attempt graceful shutdown
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
-  process.exit(1);
+  gracefulShutdown('uncaughtException');
 });
 
-// Handle unhandled promise rejections
+// Handle unhandled promise rejections — attempt graceful shutdown
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled Rejection:', err);
-  process.exit(1);
+  gracefulShutdown('unhandledRejection');
 });
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, closing server gracefully...');
-  await pool.end();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('SIGINT received, closing server gracefully...');
-  await pool.end();
-  process.exit(0);
-});
+// Graceful shutdown on signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 startServer();

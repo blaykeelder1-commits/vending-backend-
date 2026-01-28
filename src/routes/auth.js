@@ -102,19 +102,32 @@ router.post('/vendor/register', async (req, res) => {
       [verificationCode, verificationExpires, user.id]
     );
 
-    // Send verification email
-    sendEmail(email, 'emailVerification', {
-      userName: fullName,
-      verificationCode,
-    }).catch(err => {
-      console.error('[Email] Error sending verification email:', err);
-    });
+    // Send verification email — retry once on failure
+    let emailSent = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await sendEmail(email, 'emailVerification', {
+          userName: fullName,
+          verificationCode,
+        });
+        emailSent = true;
+        break;
+      } catch (err) {
+        console.error(`[Email] Verification email attempt ${attempt} failed:`, err.message);
+        if (attempt === 2) {
+          // Both attempts failed — warn the user but still allow registration
+          console.error('[Email] All attempts to send verification email failed for:', email);
+        }
+      }
+    }
 
     // Note: Onboarding sequence will be scheduled after email verification
 
     res.status(201).json({
       success: true,
-      message: 'Vendor registered successfully. Please check your email for verification code.',
+      message: emailSent
+        ? 'Vendor registered successfully. Please check your email for verification code.'
+        : 'Vendor registered, but we could not send the verification email. Please use "Resend Code" to try again.',
       data: {
         user: {
           id: user.id,
@@ -123,6 +136,7 @@ router.post('/vendor/register', async (req, res) => {
           role: user.role,
         },
         emailVerified: false,
+        emailSent,
       },
     });
   } catch (error) {
@@ -543,13 +557,27 @@ router.post('/vendor/resend-verification', async (req, res) => {
       [verificationCode, verificationExpires, user.id]
     );
 
-    // Send verification email
-    sendEmail(email, 'emailVerification', {
-      userName: user.full_name,
-      verificationCode,
-    }).catch(err => {
-      console.error('[Email] Error sending verification email:', err);
-    });
+    // Send verification email with retry
+    let emailSent = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await sendEmail(email, 'emailVerification', {
+          userName: user.full_name,
+          verificationCode,
+        });
+        emailSent = true;
+        break;
+      } catch (err) {
+        console.error(`[Email] Resend verification attempt ${attempt} failed:`, err.message);
+      }
+    }
+
+    if (!emailSent) {
+      return res.status(502).json({
+        success: false,
+        message: 'Unable to send verification email. Please try again later.',
+      });
+    }
 
     res.json({
       success: true,

@@ -42,9 +42,9 @@ router.post('/set-machine', async (req, res) => {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
     await query(
-      `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned)
-       VALUES ($1, $2, $3, true)`,
-      [machineId, sessionToken, expiresAt]
+      `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent)
+       VALUES ($1, $2, $3, true, $4, $5)`,
+      [machineId, sessionToken, expiresAt, req.ip, req.get('user-agent')]
     );
 
     res.json({
@@ -79,7 +79,7 @@ const verifySession = async (req, res, next) => {
     }
 
     const result = await query(
-      `SELECT id, machine_id, expires_at FROM customer_sessions
+      `SELECT id, machine_id, expires_at, ip_address, ip_change_count FROM customer_sessions
        WHERE session_token = $1 AND expires_at > NOW()`,
       [token]
     );
@@ -91,9 +91,28 @@ const verifySession = async (req, res, next) => {
       });
     }
 
+    const session = result.rows[0];
+
+    // IP validation — allow 1 IP change (for mobile network switches)
+    if (session.ip_address && req.ip !== session.ip_address) {
+      const changeCount = session.ip_change_count || 0;
+      if (changeCount >= 1) {
+        return res.status(401).json({
+          success: false,
+          message: 'Session invalidated due to suspicious IP change',
+        });
+      }
+      // Record the IP change
+      await query(
+        `UPDATE customer_sessions SET ip_address = $1, ip_change_count = COALESCE(ip_change_count, 0) + 1
+         WHERE id = $2`,
+        [req.ip, session.id]
+      );
+    }
+
     req.session = {
-      id: result.rows[0].id,
-      machineId: result.rows[0].machine_id,
+      id: session.id,
+      machineId: session.machine_id,
     };
 
     next();

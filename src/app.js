@@ -110,6 +110,17 @@ const registerLimiter = rateLimit({
   store: createRateLimitStore(registerWindowMs),
 });
 
+// Request timeout middleware (30 seconds default)
+const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT_MS) || 30000;
+app.use((req, res, next) => {
+  res.setTimeout(REQUEST_TIMEOUT, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ success: false, message: 'Request timeout' });
+    }
+  });
+  next();
+});
+
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -177,9 +188,13 @@ app.get('/api/health', async (req, res) => {
       ? `${hostParts[0].substring(0, 3)}***.${hostParts[hostParts.length - 2]}.${hostParts[hostParts.length - 1]}`
       : dbUrlParsed.hostname.substring(0, 10) + '***';
 
+    const dbName = dbUrlParsed.pathname.substring(1) || 'unknown';
+    const maskedDb = dbName.length > 4
+      ? dbName.substring(0, 3) + '***'
+      : '***';
     dbFingerprint = {
       host: maskedHost,
-      database: dbUrlParsed.pathname.substring(1) || 'unknown'
+      database: maskedDb
     };
 
     // Get machines count

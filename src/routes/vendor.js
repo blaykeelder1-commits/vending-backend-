@@ -28,8 +28,8 @@ router.get('/machines', async (req, res) => {
               COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as performing_count,
               COUNT(CASE WHEN mp.is_performing = false THEN 1 END) as not_performing_count
        FROM vending_machines vm
-       LEFT JOIN machine_products mp ON vm.id = mp.machine_id
-       WHERE vm.vendor_id = $1
+       LEFT JOIN machine_products mp ON vm.id = mp.machine_id AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+       WHERE vm.vendor_id = $1 AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
        GROUP BY vm.id
        ORDER BY vm.created_at DESC`,
       [req.user.id]
@@ -63,7 +63,7 @@ router.get('/machines/:id', async (req, res) => {
       `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
               google_sheet_id, qr_token, is_active, notes, created_at, updated_at
        FROM vending_machines
-       WHERE id = $1 AND vendor_id = $2`,
+       WHERE id = $1 AND vendor_id = $2 AND (is_deleted = false OR is_deleted IS NULL)`,
       [id, req.user.id]
     );
 
@@ -272,12 +272,30 @@ router.delete('/machines/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await query(
-      'DELETE FROM vending_machines WHERE id = $1 AND vendor_id = $2 RETURNING id',
-      [id, req.user.id]
-    );
+    const result = await transaction(async (client) => {
+      // Soft delete the machine
+      const machineResult = await client.query(
+        `UPDATE vending_machines SET is_deleted = true, deleted_at = NOW(), is_active = false
+         WHERE id = $1 AND vendor_id = $2 AND is_deleted = false
+         RETURNING id`,
+        [id, req.user.id]
+      );
 
-    if (result.rows.length === 0) {
+      if (machineResult.rows.length === 0) {
+        return null;
+      }
+
+      // Soft delete associated machine_products
+      await client.query(
+        `UPDATE machine_products SET is_deleted = true, deleted_at = NOW()
+         WHERE machine_id = $1 AND is_deleted = false`,
+        [id]
+      );
+
+      return machineResult.rows[0];
+    });
+
+    if (!result) {
       return res.status(404).json({
         success: false,
         message: 'Vending machine not found',
@@ -286,7 +304,7 @@ router.delete('/machines/:id', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Vending machine deleted successfully',
+      message: 'Vending machine deleted successfully (recoverable for 30 days)',
     });
   } catch (error) {
     console.error('Error deleting machine:', error);
@@ -362,7 +380,7 @@ router.get('/products', async (req, res) => {
       `SELECT id, product_name, description, price, image_url, category,
               is_active, created_at, updated_at
        FROM products
-       WHERE vendor_id = $1
+       WHERE vendor_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
        ORDER BY product_name`,
       [req.user.id]
     );
@@ -395,7 +413,7 @@ router.get('/products/:id', async (req, res) => {
       `SELECT id, product_name, description, price, image_url, category,
               is_active, created_at, updated_at
        FROM products
-       WHERE id = $1 AND vendor_id = $2`,
+       WHERE id = $1 AND vendor_id = $2 AND (is_deleted = false OR is_deleted IS NULL)`,
       [id, req.user.id]
     );
 
@@ -567,7 +585,9 @@ router.delete('/products/:id', async (req, res) => {
     const { id } = req.params;
 
     const result = await query(
-      'DELETE FROM products WHERE id = $1 AND vendor_id = $2 RETURNING id',
+      `UPDATE products SET is_deleted = true, deleted_at = NOW(), is_active = false
+       WHERE id = $1 AND vendor_id = $2 AND is_deleted = false
+       RETURNING id`,
       [id, req.user.id]
     );
 
@@ -580,7 +600,7 @@ router.delete('/products/:id', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Product deleted successfully',
+      message: 'Product deleted successfully (recoverable for 30 days)',
     });
   } catch (error) {
     console.error('Error deleting product:', error);
@@ -623,7 +643,7 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
               p.product_name, p.description, p.price, p.image_url, p.category
        FROM machine_products mp
        JOIN products p ON mp.product_id = p.id
-       WHERE mp.machine_id = $1
+       WHERE mp.machine_id = $1 AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
        ORDER BY p.product_name`,
       [machineId]
     );
