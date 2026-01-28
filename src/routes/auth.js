@@ -183,7 +183,8 @@ router.post('/vendor/login', async (req, res) => {
 
     // Find vendor user with verification status
     const userResult = await query(
-      `SELECT id, email, password_hash, full_name, role, email_verified, email_verification_code
+      `SELECT id, email, password_hash, full_name, role, email_verified,
+              email_verification_code, email_verification_expires
        FROM users WHERE email = $1`,
       [email.toLowerCase().trim()]
     );
@@ -207,20 +208,27 @@ router.post('/vendor/login', async (req, res) => {
       });
     }
 
-    // Block login if email not verified AND a verification code exists
-    // (no code = legacy account created before verification was enforced)
-    if (!user.email_verified && user.email_verification_code) {
-      return res.status(403).json({
-        success: false,
-        message: 'Please verify your email address before logging in.',
-        code: 'EMAIL_NOT_VERIFIED',
-        data: { email: user.email },
-      });
-    }
+    // Block login if email not verified
+    if (!user.email_verified) {
+      // Only block if there's an active (non-expired) verification code
+      const hasActiveCode = user.email_verification_code &&
+        user.email_verification_expires &&
+        new Date(user.email_verification_expires) > new Date();
 
-    // Auto-verify legacy accounts that have no verification code
-    if (!user.email_verified && !user.email_verification_code) {
-      await query('UPDATE users SET email_verified = true WHERE id = $1', [user.id]);
+      if (hasActiveCode) {
+        return res.status(403).json({
+          success: false,
+          message: 'Please verify your email address before logging in.',
+          code: 'EMAIL_NOT_VERIFIED',
+          data: { email: user.email },
+        });
+      }
+
+      // No active code — legacy account or expired code, auto-verify
+      await query(
+        `UPDATE users SET email_verified = true, email_verification_code = NULL, email_verification_expires = NULL WHERE id = $1`,
+        [user.id]
+      );
     }
 
     // Update last login timestamp
