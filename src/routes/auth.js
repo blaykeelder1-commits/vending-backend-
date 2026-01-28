@@ -208,17 +208,16 @@ router.post('/vendor/login', async (req, res) => {
     }
 
     // Block login if email not verified
-    // Auto-verify legacy accounts (created before verification was enforced)
+    // Auto-verify legacy accounts (no verification code = created before verification existed)
     if (!user.email_verified) {
-      const createdResult = await query(
-        `SELECT created_at FROM users WHERE id = $1`,
+      const codeResult = await query(
+        `SELECT email_verification_code FROM users WHERE id = $1`,
         [user.id]
       );
-      const createdAt = createdResult.rows[0]?.created_at;
-      const verificationEnforcedDate = new Date('2026-01-27T00:00:00Z');
+      const hasVerificationCode = !!codeResult.rows[0]?.email_verification_code;
 
-      if (createdAt && new Date(createdAt) < verificationEnforcedDate) {
-        // Legacy account — auto-verify and allow login
+      if (!hasVerificationCode) {
+        // Legacy account — no code was ever generated, auto-verify and allow login
         await query('UPDATE users SET email_verified = true WHERE id = $1', [user.id]);
       } else {
         return res.status(403).json({
