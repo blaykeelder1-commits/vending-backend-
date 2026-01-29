@@ -12,6 +12,34 @@ router.use(protect);
 router.use(restrictTo('vendor'));
 
 // ========================================
+// HELPER: Log machine history
+// ========================================
+async function logMachineHistory(machineId, vendorId, actionType, details = {}) {
+  try {
+    await query(
+      `INSERT INTO machine_history (machine_id, vendor_id, action_type, details)
+       VALUES ($1, $2, $3, $4)`,
+      [machineId, vendorId, actionType, JSON.stringify(details)]
+    );
+  } catch (err) {
+    console.error('Error logging machine history:', err);
+    // Don't throw - history logging should not break the main operation
+  }
+}
+
+// Helper: Update last_visit_at timestamp
+async function updateLastVisit(machineId) {
+  try {
+    await query(
+      `UPDATE vending_machines SET last_visit_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [machineId]
+    );
+  } catch (err) {
+    console.error('Error updating last visit:', err);
+  }
+}
+
+// ========================================
 // VENDING MACHINES ROUTES
 // ========================================
 
@@ -24,6 +52,7 @@ router.get('/machines', async (req, res) => {
     const result = await query(
       `SELECT vm.id, vm.machine_name, vm.location, vm.qr_code_data, vm.qr_code_image_url,
               vm.google_sheet_id, vm.qr_token, vm.is_active, vm.created_at, vm.updated_at,
+              vm.last_visit_at,
               COUNT(mp.id) as product_count,
               COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as performing_count,
               COUNT(CASE WHEN mp.is_performing = false THEN 1 END) as not_performing_count
@@ -61,7 +90,7 @@ router.get('/machines/:id', async (req, res) => {
 
     let result = await query(
       `SELECT id, machine_name, location, qr_code_data, qr_code_image_url,
-              google_sheet_id, qr_token, is_active, notes, created_at, updated_at
+              google_sheet_id, qr_token, is_active, notes, created_at, updated_at, last_visit_at
        FROM vending_machines
        WHERE id = $1 AND vendor_id = $2 AND (is_deleted = false OR is_deleted IS NULL)`,
       [id, req.user.id]
@@ -75,6 +104,9 @@ router.get('/machines/:id', async (req, res) => {
     }
 
     let machine = result.rows[0];
+
+    // Auto-update last_visit_at when machine is accessed
+    updateLastVisit(id);
 
     // Generate qr_token if missing (lazy generation with row-level lock to prevent race condition)
     if (!machine.qr_token) {
@@ -740,12 +772,30 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
 
     const { productId, stockQuantity } = value;
 
+    // Get product name for history logging
+    const productInfo = await query(
+      'SELECT product_name FROM products WHERE id = $1',
+      [productId]
+    );
+    const productName = productInfo.rows[0]?.product_name || 'Unknown';
+
     const result = await query(
       `INSERT INTO machine_products (machine_id, product_id, current_stock)
        VALUES ($1, $2, $3)
        RETURNING *`,
       [machineId, productId, stockQuantity]
     );
+
+    // Log to machine_history for visit memory
+    await logMachineHistory(machineId, req.user.id, 'product_added', {
+      product_id: productId,
+      product_name: productName,
+      initial_stock: stockQuantity,
+      inventory_id: result.rows[0].id
+    });
+
+    // Update last visit timestamp
+    updateLastVisit(machineId);
 
     res.status(201).json({
       success: true,
@@ -877,6 +927,26 @@ router.put('/machines/:machineId/inventory/:id/performance', async (req, res) =>
 
     const { isPerforming, notes } = value;
 
+    // Get current status and product info for history logging
+    const currentItem = await query(
+      `SELECT mp.is_performing, mp.product_id, p.product_name
+       FROM machine_products mp
+       JOIN products p ON mp.product_id = p.id
+       WHERE mp.id = $1 AND mp.machine_id = $2`,
+      [id, machineId]
+    );
+
+    if (currentItem.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Inventory item not found',
+      });
+    }
+
+    const oldStatus = currentItem.rows[0].is_performing;
+    const productId = currentItem.rows[0].product_id;
+    const productName = currentItem.rows[0].product_name;
+
     // Update performance status
     const result = await query(
       `UPDATE machine_products
@@ -886,19 +956,24 @@ router.put('/machines/:machineId/inventory/:id/performance', async (req, res) =>
       [isPerforming, id, machineId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Inventory item not found',
-      });
-    }
-
     // Log the performance change
     await query(
       `INSERT INTO product_performance_log (machine_product_id, is_performing, marked_by, notes)
        VALUES ($1, $2, $3, $4)`,
       [id, isPerforming, req.user.id, notes || null]
     );
+
+    // Log to machine_history for visit memory
+    await logMachineHistory(machineId, req.user.id, 'performance_change', {
+      product_id: productId,
+      product_name: productName,
+      old_status: oldStatus,
+      new_status: isPerforming,
+      inventory_id: parseInt(id)
+    });
+
+    // Update last visit timestamp
+    updateLastVisit(machineId);
 
     res.json({
       success: true,
@@ -935,6 +1010,15 @@ router.delete('/machines/:machineId/inventory/:id', async (req, res) => {
       });
     }
 
+    // Get product info before deletion for history logging
+    const productInfo = await query(
+      `SELECT mp.product_id, p.product_name, mp.current_stock, mp.is_performing
+       FROM machine_products mp
+       JOIN products p ON mp.product_id = p.id
+       WHERE mp.id = $1 AND mp.machine_id = $2`,
+      [id, machineId]
+    );
+
     const result = await query(
       'DELETE FROM machine_products WHERE id = $1 AND machine_id = $2 RETURNING id',
       [id, machineId]
@@ -946,6 +1030,21 @@ router.delete('/machines/:machineId/inventory/:id', async (req, res) => {
         message: 'Inventory item not found',
       });
     }
+
+    // Log to machine_history for visit memory
+    if (productInfo.rows.length > 0) {
+      const { product_id, product_name, current_stock, is_performing } = productInfo.rows[0];
+      await logMachineHistory(machineId, req.user.id, 'product_removed', {
+        product_id,
+        product_name,
+        stock_at_removal: current_stock,
+        was_performing: is_performing,
+        reason: 'manual'
+      });
+    }
+
+    // Update last visit timestamp
+    updateLastVisit(machineId);
 
     res.json({
       success: true,
@@ -1983,6 +2082,179 @@ router.put('/machines/:id/notes', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error updating notes',
+    });
+  }
+});
+
+// ============================================
+// MACHINE VISIT HISTORY ROUTES
+// ============================================
+
+/**
+ * GET /api/vendor/machines/:machineId/changes-since-visit
+ * Get summary of changes since last visit for "Since Last Visit" card
+ */
+router.get('/machines/:machineId/changes-since-visit', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const vendorId = req.user.id;
+
+    // Verify machine belongs to vendor and get last visit timestamp
+    const machineCheck = await query(
+      'SELECT id, last_visit_at FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    const lastVisitAt = machineCheck.rows[0].last_visit_at;
+
+    // If no previous visit, return empty changes
+    if (!lastVisitAt) {
+      return res.json({
+        success: true,
+        data: {
+          lastVisitAt: null,
+          hasHistory: false,
+          summary: {
+            performanceChanges: 0,
+            productsAdded: 0,
+            productsRemoved: 0,
+            totalChanges: 0
+          },
+          changes: []
+        }
+      });
+    }
+
+    // Get count of changes since last visit by type
+    const summaryResult = await query(
+      `SELECT action_type, COUNT(*) as count
+       FROM machine_history
+       WHERE machine_id = $1 AND created_at > $2
+       GROUP BY action_type`,
+      [machineId, lastVisitAt]
+    );
+
+    const summary = {
+      performanceChanges: 0,
+      productsAdded: 0,
+      productsRemoved: 0,
+      stockUpdates: 0,
+      noteUpdates: 0,
+      totalChanges: 0
+    };
+
+    summaryResult.rows.forEach(row => {
+      const count = parseInt(row.count);
+      summary.totalChanges += count;
+      switch (row.action_type) {
+        case 'performance_change':
+          summary.performanceChanges = count;
+          break;
+        case 'product_added':
+          summary.productsAdded = count;
+          break;
+        case 'product_removed':
+          summary.productsRemoved = count;
+          break;
+        case 'stock_updated':
+          summary.stockUpdates = count;
+          break;
+        case 'note_updated':
+          summary.noteUpdates = count;
+          break;
+      }
+    });
+
+    // Get detailed changes (most recent 20)
+    const changesResult = await query(
+      `SELECT action_type, details, created_at
+       FROM machine_history
+       WHERE machine_id = $1 AND created_at > $2
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [machineId, lastVisitAt]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        lastVisitAt,
+        hasHistory: true,
+        summary,
+        changes: changesResult.rows.map(row => ({
+          actionType: row.action_type,
+          details: row.details,
+          createdAt: row.created_at
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching changes since visit:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching visit changes',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:machineId/history
+ * Get full history for a machine (for detailed view)
+ */
+router.get('/machines/:machineId/history', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const { limit = 50, offset = 0 } = req.query;
+    const vendorId = req.user.id;
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, vendorId]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Machine not found',
+      });
+    }
+
+    const result = await query(
+      `SELECT id, action_type, details, created_at
+       FROM machine_history
+       WHERE machine_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [machineId, parseInt(limit), parseInt(offset)]
+    );
+
+    const countResult = await query(
+      'SELECT COUNT(*) as total FROM machine_history WHERE machine_id = $1',
+      [machineId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        history: result.rows,
+        total: parseInt(countResult.rows[0].total),
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching machine history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching machine history',
     });
   }
 });
