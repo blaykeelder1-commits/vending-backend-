@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { query } = require('../config/database');
+const logger = require('../utils/logger');
 
 // Verify JWT token for vendor authentication
 const verifyToken = async (req, res, next) => {
@@ -108,7 +109,7 @@ const verifyCustomerSession = async (req, res, next) => {
 
     next();
   } catch (error) {
-    console.error('Session verification error:', error);
+    logger.error('Session verification error', { error: error.message });
     return res.status(500).json({
       success: false,
       message: 'Error verifying session.',
@@ -205,7 +206,7 @@ const protect = async (req, res, next) => {
       message: 'Invalid or expired token.',
     });
   } catch (error) {
-    console.error('Authentication error:', error);
+    logger.error('Authentication error', { error: error.message });
     return res.status(500).json({
       success: false,
       message: 'Error verifying authentication.',

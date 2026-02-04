@@ -4,6 +4,7 @@ const { query, transaction } = require('../config/database');
 const { protect, restrictTo } = require('../middleware/auth');
 const { generateQRCodeData, generateQRCodeDataURL } = require('../services/qrCodeService');
 const rankingService = require('../services/rankingService');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
@@ -22,7 +23,7 @@ async function logMachineHistory(machineId, vendorId, actionType, details = {}) 
       [machineId, vendorId, actionType, JSON.stringify(details)]
     );
   } catch (err) {
-    console.error('Error logging machine history:', err);
+    logger.error('Error logging machine history', { error: err.message });
     // Don't throw - history logging should not break the main operation
   }
 }
@@ -35,7 +36,7 @@ async function updateLastVisit(machineId) {
       [machineId]
     );
   } catch (err) {
-    console.error('Error updating last visit:', err);
+    logger.error('Error updating last visit', { error: err.message });
   }
 }
 
@@ -72,7 +73,7 @@ router.get('/machines', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching machines:', error);
+    logger.error('Error fetching machines', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching vending machines',
@@ -133,7 +134,7 @@ router.get('/machines/:id', async (req, res) => {
       data: { machine },
     });
   } catch (error) {
-    console.error('Error fetching machine:', error);
+    logger.error('Error fetching machine', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching vending machine',
@@ -205,7 +206,7 @@ router.post('/machines', async (req, res) => {
       data: { machine: finalResult.rows[0] },
     });
   } catch (error) {
-    console.error('Error creating machine:', error);
+    logger.error('Error creating machine', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error creating vending machine',
@@ -288,7 +289,7 @@ router.put('/machines/:id', async (req, res) => {
       data: { machine: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating machine:', error);
+    logger.error('Error updating machine', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating vending machine',
@@ -339,7 +340,7 @@ router.delete('/machines/:id', async (req, res) => {
       message: 'Vending machine deleted successfully (recoverable for 30 days)',
     });
   } catch (error) {
-    console.error('Error deleting machine:', error);
+    logger.error('Error deleting machine', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error deleting vending machine',
@@ -390,7 +391,7 @@ router.get('/machines/:id/qr', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Error getting machine QR:', err);
+    logger.error('Error getting machine QR', { error: err.message });
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -425,7 +426,7 @@ router.get('/products', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching products:', error);
+    logger.error('Error fetching products', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching products',
@@ -461,7 +462,7 @@ router.get('/products/:id', async (req, res) => {
       data: { product: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error fetching product:', error);
+    logger.error('Error fetching product', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching product',
@@ -507,7 +508,7 @@ router.post('/products', async (req, res) => {
       data: { product: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error creating product:', error);
+    logger.error('Error creating product', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error creating product',
@@ -600,7 +601,7 @@ router.put('/products/:id', async (req, res) => {
       data: { product: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating product:', error);
+    logger.error('Error updating product', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating product',
@@ -635,7 +636,7 @@ router.delete('/products/:id', async (req, res) => {
       message: 'Product deleted successfully (recoverable for 30 days)',
     });
   } catch (error) {
-    console.error('Error deleting product:', error);
+    logger.error('Error deleting product', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error deleting product',
@@ -703,7 +704,7 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching inventory:', error);
+    logger.error('Error fetching inventory', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching machine inventory',
@@ -803,7 +804,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
       data: { inventoryItem: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error adding to inventory:', error);
+    logger.error('Error adding to inventory', { error: error.message });
     if (error.message && error.message.includes('unique')) {
       return res.status(409).json({
         success: false,
@@ -884,7 +885,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
       data: { inventoryItem: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating inventory:', error);
+    logger.error('Error updating inventory', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating inventory',
@@ -981,7 +982,7 @@ router.put('/machines/:machineId/inventory/:id/performance', async (req, res) =>
       data: { inventoryItem: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating performance:', error);
+    logger.error('Error updating performance', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating performance status',
@@ -1051,7 +1052,7 @@ router.delete('/machines/:machineId/inventory/:id', async (req, res) => {
       message: 'Product removed from inventory',
     });
   } catch (error) {
-    console.error('Error removing from inventory:', error);
+    logger.error('Error removing from inventory', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error removing product from inventory',
@@ -1118,7 +1119,7 @@ router.get('/performance-comparison', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching performance comparison:', error);
+    logger.error('Error fetching performance comparison', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching performance comparison',
@@ -1145,7 +1146,7 @@ router.get('/top-products', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching top products:', error);
+    logger.error('Error fetching top products', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching top products',
@@ -1310,7 +1311,7 @@ router.get('/redistribution-plan', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error generating redistribution plan:', error);
+    logger.error('Error generating redistribution plan', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error generating redistribution plan',
@@ -1413,7 +1414,7 @@ router.post('/machines/:machineId/polls', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error creating poll:', error);
+    logger.error('Error creating poll', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error creating poll',
@@ -1470,7 +1471,7 @@ router.get('/machines/:machineId/polls', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching polls:', error);
+    logger.error('Error fetching polls', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching polls',
@@ -1561,7 +1562,7 @@ router.get('/machines/:machineId/swipe-results', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching swipe results:', error);
+    logger.error('Error fetching swipe results', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching swipe results',
@@ -1643,7 +1644,7 @@ router.get('/polls/:pollId/results', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching poll results:', error);
+    logger.error('Error fetching poll results', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching poll results',
@@ -1691,7 +1692,7 @@ router.get('/poll-summary', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching poll summary:', error);
+    logger.error('Error fetching poll summary', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching poll summary',
@@ -1795,7 +1796,7 @@ router.get('/machines/:machineId/redistribution-targets', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching redistribution targets:', error);
+    logger.error('Error fetching redistribution targets', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching redistribution targets',
@@ -1960,7 +1961,7 @@ router.post('/redistribution', async (req, res) => {
       data: result,
     });
   } catch (error) {
-    console.error('Error executing redistribution:', error);
+    logger.error('Error executing redistribution', { error: error.message });
     res.status(error.message.includes('not found') || error.message.includes('Insufficient') ? 400 : 500).json({
       success: false,
       message: error.message || 'Error executing redistribution',
@@ -2018,7 +2019,7 @@ router.get('/redistribution-history', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching redistribution history:', error);
+    logger.error('Error fetching redistribution history', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching redistribution history',
@@ -2078,7 +2079,7 @@ router.put('/machines/:id/notes', async (req, res) => {
       data: { machine: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating machine notes:', error);
+    logger.error('Error updating machine notes', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating notes',
@@ -2196,7 +2197,7 @@ router.get('/machines/:machineId/changes-since-visit', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching changes since visit:', error);
+    logger.error('Error fetching changes since visit', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching visit changes',
@@ -2251,7 +2252,7 @@ router.get('/machines/:machineId/history', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching machine history:', error);
+    logger.error('Error fetching machine history', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching machine history',
@@ -2321,7 +2322,7 @@ router.get('/suggestions', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching suggestions:', error);
+    logger.error('Error fetching suggestions', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching suggestions',
@@ -2381,7 +2382,7 @@ router.put('/suggestions/:id', async (req, res) => {
       data: { suggestion: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating suggestion:', error);
+    logger.error('Error updating suggestion', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating suggestion',
@@ -2442,7 +2443,7 @@ router.get('/expiring-products', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching expiring products:', error);
+    logger.error('Error fetching expiring products', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching expiring products',
@@ -2506,7 +2507,7 @@ router.put('/machines/:machineId/inventory/:id/expiration', async (req, res) => 
       data: { item: result.rows[0] },
     });
   } catch (error) {
-    console.error('Error updating expiration date:', error);
+    logger.error('Error updating expiration date', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error updating expiration date',

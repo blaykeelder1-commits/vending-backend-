@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
 const path = require('path');
+const logger = require('../utils/logger');
 
 // Encryption settings
 const ALGORITHM = 'aes-256-cbc';
@@ -12,11 +13,11 @@ const IV_LENGTH = 16;
 function getEncryptionKey() {
   const key = process.env.QR_ENCRYPTION_KEY;
   if (!key) {
-    console.warn('[Security] QR_ENCRYPTION_KEY not set - using insecure default. Set this in production!');
+    logger.warn('QR_ENCRYPTION_KEY not set - using insecure default. Set this in production!');
     return Buffer.from('12345678901234567890123456789012', 'utf8');
   }
   if (key.length < 32) {
-    console.warn('[Security] QR_ENCRYPTION_KEY is less than 32 characters - padding to 32');
+    logger.warn('QR_ENCRYPTION_KEY is less than 32 characters - padding to 32');
     return Buffer.from(key.padEnd(32, '0'), 'utf8');
   }
   return Buffer.from(key, 'utf8').slice(0, 32);

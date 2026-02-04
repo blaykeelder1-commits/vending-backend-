@@ -9,6 +9,7 @@ const RefreshToken = require('../models/RefreshToken');
 const { validateQRCodeData } = require('../services/qrCodeService');
 const { query, transaction } = require('../config/database');
 const { scheduleOnboardingSequence, sendEmail } = require('../services/emailService');
+const logger = require('../utils/logger');
 
 // Initialize Google OAuth client
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -120,7 +121,7 @@ router.post('/vendor/register', async (req, res) => {
           }
           break;
         } catch (err) {
-          console.error(`[Email] Verification email attempt ${attempt} failed:`, err.message);
+          logger.warn('Verification email attempt failed', { attempt, error: err.message });
         }
       }
     }
@@ -150,7 +151,7 @@ router.post('/vendor/register', async (req, res) => {
       data: responseData,
     });
   } catch (error) {
-    console.error('Vendor registration error:', error);
+    logger.error('Vendor registration error', { error: error.message });
     if (error.message === 'Email already exists') {
       return res.status(409).json({
         success: false,
@@ -233,7 +234,7 @@ router.post('/vendor/login', async (req, res) => {
 
     // Update last login timestamp
     query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(err => {
-      console.error('Error updating last_login_at:', err);
+      logger.error('Error updating last_login_at', { error: err.message });
     });
 
     // Generate JWT access token
@@ -266,7 +267,7 @@ router.post('/vendor/login', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Vendor login error:', error);
+    logger.error('Vendor login error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error logging in',
@@ -303,7 +304,7 @@ router.post('/vendor/google', async (req, res) => {
       });
       payload = ticket.getPayload();
     } catch (googleError) {
-      console.error('Google token verification failed:', googleError);
+      logger.warn('Google token verification failed', { error: googleError.message });
       return res.status(401).json({
         success: false,
         message: 'Invalid Google credential',
@@ -344,7 +345,7 @@ router.post('/vendor/google', async (req, res) => {
 
         // Schedule onboarding emails for new users
         scheduleOnboardingSequence(user.id, email, name).catch(err => {
-          console.error('[Email] Error scheduling onboarding:', err);
+          logger.error('Error scheduling onboarding', { error: err.message });
         });
       }
     }
@@ -359,7 +360,7 @@ router.post('/vendor/google', async (req, res) => {
 
     // Update last login timestamp
     query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(err => {
-      console.error('Error updating last_login_at:', err);
+      logger.error('Error updating last_login_at', { error: err.message });
     });
 
     // Generate JWT access token
@@ -377,7 +378,6 @@ router.post('/vendor/google', async (req, res) => {
     // Store refresh token
     await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
 
-    // DEBUG ONLY: console.log(`[Auth] Google login successful for ${email}`);
 
     res.json({
       success: true,
@@ -395,7 +395,7 @@ router.post('/vendor/google', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Google OAuth error:', error);
+    logger.error('Google OAuth error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error processing Google sign-in',
@@ -479,7 +479,7 @@ router.post('/vendor/verify-email', async (req, res) => {
 
     // Now schedule onboarding email sequence
     scheduleOnboardingSequence(user.id, user.email, user.full_name).catch(err => {
-      console.error('[Email] Error scheduling onboarding:', err);
+      logger.error('Error scheduling onboarding', { error: err.message });
     });
 
     // Generate JWT access token so user can proceed to dashboard
@@ -512,7 +512,7 @@ router.post('/vendor/verify-email', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Email verification error:', error);
+    logger.error('Email verification error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error verifying email',
@@ -596,7 +596,7 @@ router.post('/vendor/resend-verification', async (req, res) => {
           }
           break;
         } catch (err) {
-          console.error(`[Email] Resend verification attempt ${attempt} failed:`, err.message);
+          logger.warn('Resend verification attempt failed', { attempt, error: err.message });
         }
       }
     }
@@ -617,7 +617,7 @@ router.post('/vendor/resend-verification', async (req, res) => {
       ...responseData,
     });
   } catch (error) {
-    console.error('Resend verification error:', error);
+    logger.error('Resend verification error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error resending verification code',
@@ -680,17 +680,16 @@ router.post('/vendor/forgot-password', async (req, res) => {
       userName: user.full_name,
       resetToken,
     }).catch(err => {
-      console.error('[Email] Error sending password reset email:', err);
+      logger.error('Error sending password reset email', { error: err.message });
     });
 
-    // DEBUG ONLY: console.log(`[Auth] Password reset requested for ${email}`);
 
     res.json({
       success: true,
       message: 'If an account exists with this email, a password reset link has been sent.',
     });
   } catch (error) {
-    console.error('Forgot password error:', error);
+    logger.error('Forgot password error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error processing password reset request',
@@ -755,13 +754,12 @@ router.post('/vendor/reset-password', async (req, res) => {
       [passwordHash, user.id]
     );
 
-    // DEBUG ONLY: console.log(`[Auth] Password reset successful for ${user.email}`);
 
     // Send confirmation email
     sendEmail(user.email, 'passwordChanged', {
       userName: user.full_name,
     }).catch(err => {
-      console.error('[Email] Error sending password changed email:', err);
+      logger.error('Error sending password changed email', { error: err.message });
     });
 
     res.json({
@@ -769,7 +767,7 @@ router.post('/vendor/reset-password', async (req, res) => {
       message: 'Password has been reset successfully. You can now log in with your new password.',
     });
   } catch (error) {
-    console.error('Reset password error:', error);
+    logger.error('Reset password error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error resetting password',
@@ -821,7 +819,7 @@ router.post('/customer/register', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Customer registration error:', error);
+    logger.error('Customer registration error', { error: error.message });
     if (error.message === 'Email already exists') {
       return res.status(409).json({
         success: false,
@@ -905,7 +903,7 @@ router.post('/customer/login', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Customer login error:', error);
+    logger.error('Customer login error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error logging in',
@@ -1005,7 +1003,7 @@ router.post('/customer/qr-login', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Customer QR login error:', error);
+    logger.error('Customer QR login error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error processing QR login',
@@ -1073,7 +1071,7 @@ router.get('/verify', async (req, res) => {
       message: 'Invalid or expired token',
     });
   } catch (error) {
-    console.error('Token verification error:', error);
+    logger.error('Token verification error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error verifying token',
@@ -1110,7 +1108,7 @@ router.get('/public/machines/by-qr/:qr_token', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Error resolving QR token:', err);
+    logger.error('Error resolving QR token', { error: err.message });
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -1182,7 +1180,6 @@ router.post('/refresh', async (req, res) => {
     // Store the new refresh token
     await RefreshToken.create(user.id, newRefreshTokenHash, newExpiresAt);
 
-    // DEBUG ONLY: console.log(`[Auth] Token refreshed for user ${user.email}`);
 
     res.json({
       success: true,
@@ -1200,7 +1197,7 @@ router.post('/refresh', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Token refresh error:', error);
+    logger.error('Token refresh error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error refreshing token',
@@ -1234,7 +1231,7 @@ router.post('/logout', async (req, res) => {
       message: 'Logged out successfully',
     });
   } catch (error) {
-    console.error('Logout error:', error);
+    logger.error('Logout error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error logging out',

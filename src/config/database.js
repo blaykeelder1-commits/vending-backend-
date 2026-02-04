@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 require('dotenv').config();
+const logger = require('../utils/logger');
 
 // PostgreSQL connection pool
 // Note: ssl.rejectUnauthorized: false is needed for some cloud providers (Render, Heroku)
@@ -17,12 +18,12 @@ const pool = new Pool({
 
 // Test database connection
 pool.on('connect', () => {
-  console.log('Connected to PostgreSQL database');
+  logger.info('Connected to PostgreSQL database');
 });
 
 pool.on('error', (err) => {
   // Log error without potentially sensitive connection details
-  console.error('Unexpected error on idle PostgreSQL client:', err.message);
+  logger.error('Unexpected error on idle PostgreSQL client', { error: err.message });
   // Don't exit - let the pool recover or individual queries fail gracefully
   // The pool will automatically attempt to reconnect on next query
 });
@@ -31,7 +32,7 @@ pool.on('error', (err) => {
 setInterval(() => {
   const { totalCount, idleCount, waitingCount } = pool;
   if (waitingCount > 0) {
-    console.warn(`[DB Pool] Waiting: ${waitingCount}, Active: ${totalCount - idleCount}, Idle: ${idleCount}, Total: ${totalCount}`);
+    logger.warn('DB Pool connections waiting', { waiting: waitingCount, active: totalCount - idleCount, idle: idleCount, total: totalCount });
   }
 }, 10000);
 
@@ -45,16 +46,12 @@ const query = async (text, params) => {
     if (process.env.NODE_ENV === 'development' || duration > 1000) {
       // Truncate query text to avoid logging sensitive data
       const truncatedText = text.length > 100 ? text.substring(0, 100) + '...' : text;
-      console.log('Executed query', { text: truncatedText, duration, rows: res.rowCount });
+      logger.debug('Executed query', { text: truncatedText, duration, rows: res.rowCount });
     }
     return res;
   } catch (error) {
     // Log error without sensitive parameter data
-    console.error('Database query error:', {
-      error: error.message,
-      code: error.code,
-      query: text.substring(0, 100)
-    });
+    logger.error('Database query error', { error: error.message, code: error.code, query: text.substring(0, 100) });
     throw error;
   }
 };

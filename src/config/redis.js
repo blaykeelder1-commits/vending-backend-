@@ -1,4 +1,5 @@
 const { Redis } = require('@upstash/redis');
+const logger = require('../utils/logger');
 
 let redis = null;
 
@@ -8,9 +9,9 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
     url: process.env.UPSTASH_REDIS_REST_URL,
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
   });
-  console.log('Redis cache initialized');
+  logger.info('Redis cache initialized');
 } else {
-  console.log('Redis cache disabled (no credentials provided)');
+  logger.info('Redis cache disabled (no credentials provided)');
 }
 
 // Cache wrapper with fallback for when Redis is unavailable
@@ -20,7 +21,7 @@ const cache = {
     try {
       return await redis.get(key);
     } catch (error) {
-      console.error('Redis GET error:', error.message);
+      logger.error('Redis GET error', { error: error.message });
       return null;
     }
   },
@@ -33,7 +34,7 @@ const cache = {
       await redis.set(key, serialized, { ex: ttlSeconds });
       return true;
     } catch (error) {
-      console.error('Redis SET error:', error.message);
+      logger.error('Redis SET error', { error: error.message });
       return false;
     }
   },
@@ -44,7 +45,7 @@ const cache = {
       await redis.del(key);
       return true;
     } catch (error) {
-      console.error('Redis DEL error:', error.message);
+      logger.error('Redis DEL error', { error: error.message });
       return false;
     }
   },
@@ -58,7 +59,7 @@ const cache = {
       }
       return true;
     } catch (error) {
-      console.error('Redis DEL pattern error:', error.message);
+      logger.error('Redis DEL pattern error', { error: error.message });
       return false;
     }
   },
@@ -99,7 +100,7 @@ class RedisRateLimitStore {
       const resetTime = new Date(Date.now() + (ttl > 0 ? ttl : this.windowMs));
       return { totalHits, resetTime };
     } catch (error) {
-      console.error('Redis rate limit error:', error.message);
+      logger.error('Redis rate limit error', { error: error.message });
       return { totalHits: 0, resetTime: new Date(Date.now() + this.windowMs) };
     }
   }
@@ -109,7 +110,7 @@ class RedisRateLimitStore {
     try {
       await redis.decr(this.prefix + key);
     } catch (error) {
-      console.error('Redis rate limit decrement error:', error.message);
+      logger.error('Redis rate limit decrement error', { error: error.message });
     }
   }
 
@@ -118,7 +119,7 @@ class RedisRateLimitStore {
     try {
       await redis.del(this.prefix + key);
     } catch (error) {
-      console.error('Redis rate limit reset error:', error.message);
+      logger.error('Redis rate limit reset error', { error: error.message });
     }
   }
 }

@@ -1,6 +1,7 @@
 const { pool } = require('../config/database');
 const fs = require('fs');
 const path = require('path');
+const logger = require('../utils/logger');
 
 async function ensureMigrationsTable() {
   const createTableQuery = `
@@ -31,7 +32,7 @@ async function runMigrations() {
   const migrationsDir = path.join(__dirname, 'migrations');
   const migrationFiles = fs.readdirSync(migrationsDir).sort();
 
-  console.log('Starting database migrations...\n');
+  logger.info('Starting database migrations...');
 
   // Ensure migrations tracking table exists
   await ensureMigrationsTable();
@@ -46,29 +47,29 @@ async function runMigrations() {
 
     // Skip if already executed
     if (executedMigrations.has(file)) {
-      console.log(`⊙ ${file} (already executed)`);
+      logger.debug('Migration already executed', { file });
       continue;
     }
 
     try {
-      console.log(`Running migration: ${file}`);
+      logger.info('Running migration', { file });
       const filePath = path.join(migrationsDir, file);
       const sql = fs.readFileSync(filePath, 'utf8');
 
       await pool.query(sql);
       await recordMigration(file);
-      console.log(`✓ ${file} completed successfully\n`);
+      logger.info('Migration completed successfully', { file });
       newMigrationsCount++;
     } catch (error) {
-      console.error(`✗ Error running migration ${file}:`, error.message);
+      logger.error('Error running migration', { file, error: error.message });
       process.exit(1);
     }
   }
 
   if (newMigrationsCount === 0) {
-    console.log('✓ No new migrations to run');
+    logger.info('No new migrations to run');
   } else {
-    console.log(`✓ ${newMigrationsCount} new migration(s) completed successfully!`);
+    logger.info('Migrations completed successfully', { count: newMigrationsCount });
   }
 
   await pool.end();

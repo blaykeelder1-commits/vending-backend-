@@ -1,6 +1,8 @@
 const express = require('express');
 const Joi = require('joi');
 const { query, transaction } = require('../config/database');
+const analyticsService = require('../services/analyticsService');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
@@ -41,11 +43,32 @@ router.post('/set-machine', async (req, res) => {
     const sessionToken = require('crypto').randomUUID();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-    await query(
+    const sessionResult = await query(
       `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent)
-       VALUES ($1, $2, $3, true, $4, $5)`,
+       VALUES ($1, $2, $3, true, $4, $5)
+       RETURNING id`,
       [machineId, sessionToken, expiresAt, req.ip, req.get('user-agent')]
     );
+
+    const sessionId = sessionResult.rows[0].id;
+
+    // Get vendor ID for analytics tracking
+    const vendorResult = await query(
+      'SELECT vendor_id FROM vending_machines WHERE id = $1',
+      [machineId]
+    );
+
+    // Track QR scan event
+    if (vendorResult.rows.length > 0) {
+      analyticsService.trackEvent({
+        eventType: 'qr_scan',
+        machineId,
+        vendorId: vendorResult.rows[0].vendor_id,
+        sessionId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+    }
 
     res.json({
       success: true,
@@ -56,7 +79,7 @@ router.post('/set-machine', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error setting machine:', error);
+    logger.error('Error setting machine', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error creating machine session',
@@ -117,7 +140,7 @@ const verifySession = async (req, res, next) => {
 
     next();
   } catch (error) {
-    console.error('Session verification error:', error);
+    logger.error('Session verification error', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Session verification failed',
@@ -173,7 +196,7 @@ router.get('/machine', verifySession, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching machine info:', error);
+    logger.error('Error fetching machine info', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching machine information',
@@ -336,7 +359,7 @@ router.get('/polls', verifySession, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching polls:', error);
+    logger.error('Error fetching polls', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching poll',
@@ -430,6 +453,30 @@ router.post('/polls/:pollId/vote', verifySession, async (req, res) => {
       });
     }
 
+    // Get vendor ID for analytics tracking
+    const vendorResult = await query(
+      'SELECT vendor_id FROM vending_machines WHERE id = $1',
+      [option.machine_id]
+    );
+
+    // Track poll vote event
+    if (vendorResult.rows.length > 0) {
+      analyticsService.trackEvent({
+        eventType: 'poll_vote',
+        machineId: option.machine_id,
+        vendorId: vendorResult.rows[0].vendor_id,
+        sessionId,
+        metadata: {
+          pollId: parseInt(pollId),
+          optionId,
+          voteType,
+        },
+      });
+
+      // Update session activity
+      analyticsService.updateSessionActivity(sessionId);
+    }
+
     // Get remaining count
     const remainingResult = await query(
       `SELECT COUNT(*) as remaining FROM poll_options po
@@ -453,7 +500,7 @@ router.post('/polls/:pollId/vote', verifySession, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error voting on poll:', error);
+    logger.error('Error voting on poll', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error recording vote',
@@ -496,7 +543,7 @@ router.get('/polls/:pollId/results', verifySession, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching poll results:', error);
+    logger.error('Error fetching poll results', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching results',
@@ -539,6 +586,28 @@ router.post('/suggestions', verifySession, async (req, res) => {
       [machineId, suggestion.trim(), sessionId]
     );
 
+    // Get vendor ID for analytics tracking
+    const vendorResult = await query(
+      'SELECT vendor_id FROM vending_machines WHERE id = $1',
+      [machineId]
+    );
+
+    // Track suggestion submit event
+    if (vendorResult.rows.length > 0) {
+      analyticsService.trackEvent({
+        eventType: 'suggestion_submit',
+        machineId,
+        vendorId: vendorResult.rows[0].vendor_id,
+        sessionId,
+        metadata: {
+          suggestionId: result.rows[0].id,
+        },
+      });
+
+      // Update session activity
+      analyticsService.updateSessionActivity(sessionId);
+    }
+
     res.json({
       success: true,
       message: 'Thank you! Your suggestion has been sent to the vendor.',
@@ -547,7 +616,7 @@ router.post('/suggestions', verifySession, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error submitting suggestion:', error);
+    logger.error('Error submitting suggestion', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error submitting suggestion',

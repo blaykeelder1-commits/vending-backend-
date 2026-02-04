@@ -5,9 +5,7 @@ let resend = null;
 // Initialize Resend if API key is provided
 if (process.env.RESEND_API_KEY) {
   resend = new Resend(process.env.RESEND_API_KEY);
-  // DEBUG ONLY: console.log('Resend email service initialized');
 } else {
-  // DEBUG ONLY: console.log('Resend email service disabled (no API key provided)');
 }
 
 // Use Resend's onboarding email until a custom domain is verified
@@ -360,7 +358,6 @@ const templates = {
 // Send email function
 async function sendEmail(to, templateName, templateData = {}) {
   if (!resend) {
-    // DEBUG ONLY: console.log(`[Email Mock] Would send "${templateName}" to ${to}`, templateData);
     return { success: true, mock: true };
   }
 
@@ -389,10 +386,8 @@ async function sendEmail(to, templateName, templateData = {}) {
       html,
     });
 
-    // DEBUG ONLY: console.log(`[Email] Sent "${templateName}" to ${to}`, result);
     return { success: true, id: result.id };
   } catch (error) {
-    // DEBUG ONLY: console.error(`[Email Error] Failed to send "${templateName}" to ${to}:`, error);
     return { success: false, error: error.message };
   }
 }
@@ -420,10 +415,8 @@ async function scheduleOnboardingSequence(userId, email, userName) {
       );
     }
 
-    // DEBUG ONLY: console.log(`[Email] Scheduled onboarding sequence for user ${userId}`);
     return { success: true };
   } catch (error) {
-    // DEBUG ONLY: console.error('[Email] Error scheduling onboarding sequence:', error);
     return { success: false, error: error.message };
   }
 }

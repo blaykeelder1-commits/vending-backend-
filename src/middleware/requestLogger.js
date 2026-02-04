@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
+const logger = require('../utils/logger');
 
 function requestLogger(req, res, next) {
   req.correlationId = req.headers['x-correlation-id'] || uuidv4();
@@ -8,14 +9,13 @@ function requestLogger(req, res, next) {
 
   res.on('finish', () => {
     const duration = Date.now() - start;
-    console.log(JSON.stringify({
+    logger.info('Request completed', {
       correlationId: req.correlationId,
       method: req.method,
       path: req.path,
       status: res.statusCode,
       duration,
-      timestamp: new Date().toISOString(),
-    }));
+    });
   });
 
   next();

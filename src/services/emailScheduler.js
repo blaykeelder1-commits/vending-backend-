@@ -6,6 +6,7 @@
 
 const { query } = require('../config/database');
 const { sendEmail } = require('./emailService');
+const logger = require('../utils/logger');
 
 /**
  * Process all pending scheduled emails that are due
@@ -34,7 +35,6 @@ async function processScheduledEmails() {
       return results;
     }
 
-    // DEBUG ONLY: console.log(`[EmailScheduler] Processing ${pendingEmails.length} scheduled emails`);
 
     for (const email of pendingEmails) {
       try {
@@ -62,7 +62,6 @@ async function processScheduledEmails() {
           `, [email.user_id, email.email, email.template_name, email.template_name, sendResult.id || null]);
 
           results.sent++;
-          // DEBUG ONLY: console.log(`[EmailScheduler] Sent "${email.template_name}" to ${email.email}`);
         } else {
           throw new Error(sendResult.error || 'Unknown send error');
         }
@@ -82,15 +81,12 @@ async function processScheduledEmails() {
 
         results.failed++;
         results.errors.push({ id: email.id, email: email.email, error: error.message });
-        // DEBUG ONLY: console.error(`[EmailScheduler] Failed to send "${email.template_name}" to ${email.email}:`, error.message);
       }
     }
 
-    // DEBUG ONLY: console.log(`[EmailScheduler] Completed: ${results.sent} sent, ${results.failed} failed`);
     return results;
 
   } catch (error) {
-    // DEBUG ONLY: console.error('[EmailScheduler] Error processing scheduled emails:', error);
     throw error;
   }
 }
@@ -140,17 +136,15 @@ async function scheduleReEngagementEmails() {
 
         results.scheduled++;
       } catch (error) {
-        // DEBUG ONLY: console.error(`[EmailScheduler] Failed to schedule re-engagement for user ${user.id}:`, error.message);
       }
     }
 
     if (results.scheduled > 0) {
-      // DEBUG ONLY: console.log(`[EmailScheduler] Scheduled ${results.scheduled} re-engagement emails`);
     }
 
     return results;
   } catch (error) {
-    console.error('[EmailScheduler] Error scheduling re-engagement emails:', error);
+    logger.error('Error scheduling re-engagement emails', { error: error.message });
     throw error;
   }
 }
@@ -167,12 +161,10 @@ async function cleanupOldEmails() {
     `);
 
     if (result.rowCount > 0) {
-      // DEBUG ONLY: console.log(`[EmailScheduler] Cleaned up ${result.rowCount} old scheduled emails`);
     }
 
     return { deleted: result.rowCount };
   } catch (error) {
-    // DEBUG ONLY: console.error('[EmailScheduler] Error cleaning up old emails:', error);
     throw error;
   }
 }
@@ -194,7 +186,6 @@ async function getSchedulerStats() {
 
     return result.rows[0];
   } catch (error) {
-    // DEBUG ONLY: console.error('[EmailScheduler] Error getting stats:', error);
     throw error;
   }
 }
@@ -203,7 +194,6 @@ async function getSchedulerStats() {
  * Run all scheduler tasks (call this from cron)
  */
 async function runSchedulerTasks() {
-  // DEBUG ONLY: console.log('[EmailScheduler] Starting scheduled tasks...');
 
   const results = {
     timestamp: new Date().toISOString(),
@@ -222,10 +212,8 @@ async function runSchedulerTasks() {
     // 3. Clean up old records
     results.cleanup = await cleanupOldEmails();
 
-    // DEBUG ONLY: console.log('[EmailScheduler] Completed all tasks:', results);
     return results;
   } catch (error) {
-    // DEBUG ONLY: console.error('[EmailScheduler] Error running tasks:', error);
     results.error = error.message;
     return results;
   }

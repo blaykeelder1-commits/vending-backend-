@@ -10,6 +10,7 @@
  */
 
 const { pool } = require('../config/database');
+const logger = require('../utils/logger');
 
 /**
  * Calculate ranking score using weighted formula
@@ -78,7 +79,7 @@ async function recalculateAllRankings() {
     };
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('[RankingService] Error recalculating rankings:', error);
+    logger.error('Error recalculating rankings', { error: error.message });
     throw error;
   } finally {
     client.release();
@@ -129,7 +130,7 @@ async function getTopProducts(limit = 50) {
     // Fallback to live calculation if cache is empty
     return await getLiveTopProducts(limit);
   } catch (error) {
-    console.error('[RankingService] Error getting top products:', error);
+    logger.error('Error getting top products', { error: error.message });
     // Fallback to live calculation on error
     return await getLiveTopProducts(limit);
   }
