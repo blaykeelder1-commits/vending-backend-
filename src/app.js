@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
 const requestLogger = require('./middleware/requestLogger');
 const { createRateLimitStore } = require('./config/redis');
+const logger = require('./utils/logger');
 require('dotenv').config();
 
 // Initialize Sentry for error tracking (if DSN is provided)
@@ -20,7 +21,7 @@ if (process.env.SENTRY_DSN) {
       Sentry.expressIntegration(),
     ],
   });
-  console.log('Sentry error tracking initialized');
+  logger.info('Sentry error tracking initialized');
 }
 
 const app = express();
@@ -67,7 +68,7 @@ const corsOptions = {
     if (isAllowed) {
       callback(null, true);
     } else {
-      console.log(`CORS blocked origin: ${origin}. Allowed: ${allowedOrigins.join(', ')}`);
+      logger.warn('CORS blocked origin', { origin, allowed: allowedOrigins });
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -287,7 +288,7 @@ app.get('/api/stats', async (req, res) => {
       data: stats,
     });
   } catch (error) {
-    console.error('Error fetching stats:', error);
+    logger.error('Error fetching stats', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error fetching statistics',
@@ -330,7 +331,7 @@ app.get('/api/admin/db-info', verifyAdminToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching DB info:', error);
+    logger.error('Error fetching DB info', { error: error.message });
     res.status(500).json({ success: false, message: 'Error fetching database info' });
   }
 });
@@ -353,7 +354,7 @@ app.post('/api/admin/run-email-scheduler', verifyAdminToken, async (req, res) =>
       }
     });
   } catch (error) {
-    console.error('Email scheduler error:', error);
+    logger.error('Email scheduler error', { error: error.message });
     res.status(500).json({ success: false, message: 'Error running email scheduler' });
   }
 });
@@ -369,7 +370,7 @@ app.get('/api/admin/email-scheduler-stats', verifyAdminToken, async (req, res) =
       data: stats,
     });
   } catch (error) {
-    console.error('Error fetching scheduler stats:', error);
+    logger.error('Error fetching scheduler stats', { error: error.message });
     res.status(500).json({ success: false, message: 'Error fetching scheduler stats' });
   }
 });
@@ -386,6 +387,7 @@ app.use('/api/auth/customer/register', registerLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
+app.use('/api/analytics', require('./routes/analytics'));
 
 // 404 handler
 app.use((req, res) => {
@@ -397,7 +399,12 @@ app.use((req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error('Error:', err);
+  logger.error('Unhandled error', {
+    error: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method
+  });
 
   // Capture error in Sentry if initialized
   if (process.env.SENTRY_DSN) {
