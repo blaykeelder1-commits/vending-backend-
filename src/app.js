@@ -6,7 +6,7 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
 const requestLogger = require('./middleware/requestLogger');
-const { createRateLimitStore } = require('./config/redis');
+const { createRateLimitStore, createKeyGenerator } = require('./config/redis');
 const logger = require('./utils/logger');
 require('dotenv').config();
 
@@ -77,19 +77,78 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// General rate limiting for all API routes (uses Redis if available)
-const generalWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
-const limiter = rateLimit({
-  windowMs: generalWindowMs,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
-  message: { success: false, message: 'Too many requests from this IP, please try again later.' },
+// =============================================================================
+// RATE LIMITING CONFIGURATION
+// =============================================================================
+// Strategy: Per-user limits for authenticated users, per-IP for unauthenticated
+// This allows 500+ users behind the same IP (NAT/corporate) to each have full quota
+
+// Rate limit violation logger
+const logRateLimitViolation = (req, limiterName) => {
+  const ip = req.ip || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+  const userId = req.user?.userId || req.user?.id || 'unauthenticated';
+  const path = req.originalUrl || req.path;
+  logger.warn('Rate limit exceeded', {
+    limiter: limiterName,
+    ip,
+    userId,
+    path,
+    method: req.method,
+    userAgent: req.headers['user-agent']?.substring(0, 100),
+  });
+};
+
+// 1. Authenticated API limiter - 2500 req/min per USER (not IP)
+// For: /api/vendor/*, /api/analytics/*
+const authWindowMs = 60 * 1000;
+const authenticatedLimiter = rateLimit({
+  windowMs: authWindowMs,
+  max: 2500,
+  message: { success: false, message: 'Too many requests, please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
-  store: createRateLimitStore(generalWindowMs),
+  store: createRateLimitStore(authWindowMs),
+  keyGenerator: createKeyGenerator('auth'),
+  handler: (req, res, next, options) => {
+    logRateLimitViolation(req, 'authenticated');
+    res.status(options.statusCode).json(options.message);
+  },
 });
-app.use('/api/', limiter);
 
-// Rate limiting for login endpoints (20 requests per minute)
+// 2. Customer API limiter - 1000 req/min per SESSION
+// For: /api/customer/*
+const customerWindowMs = 60 * 1000;
+const customerLimiter = rateLimit({
+  windowMs: customerWindowMs,
+  max: 1000,
+  message: { success: false, message: 'Too many requests, please slow down.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRateLimitStore(customerWindowMs),
+  keyGenerator: createKeyGenerator('customer'),
+  handler: (req, res, next, options) => {
+    logRateLimitViolation(req, 'customer');
+    res.status(options.statusCode).json(options.message);
+  },
+});
+
+// 3. Public endpoints limiter - 300 req/min per IP
+// For: /api/stats, /api/health, unauthenticated discovery
+const publicWindowMs = 60 * 1000;
+const publicLimiter = rateLimit({
+  windowMs: publicWindowMs,
+  max: 300,
+  message: { success: false, message: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRateLimitStore(publicWindowMs),
+  handler: (req, res, next, options) => {
+    logRateLimitViolation(req, 'public');
+    res.status(options.statusCode).json(options.message);
+  },
+});
+
+// 4. Login limiter - 20 req/min per IP (brute force protection)
 const loginWindowMs = 60 * 1000;
 const loginLimiter = rateLimit({
   windowMs: loginWindowMs,
@@ -98,9 +157,13 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: createRateLimitStore(loginWindowMs),
+  handler: (req, res, next, options) => {
+    logRateLimitViolation(req, 'login');
+    res.status(options.statusCode).json(options.message);
+  },
 });
 
-// Rate limiting for registration endpoints (10 requests per hour)
+// 5. Registration limiter - 10 req/hour per IP (spam prevention)
 const registerWindowMs = 60 * 60 * 1000;
 const registerLimiter = rateLimit({
   windowMs: registerWindowMs,
@@ -109,6 +172,10 @@ const registerLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: createRateLimitStore(registerWindowMs),
+  handler: (req, res, next, options) => {
+    logRateLimitViolation(req, 'register');
+    res.status(options.statusCode).json(options.message);
+  },
 });
 
 // Request timeout middleware (30 seconds default)
@@ -162,6 +229,28 @@ const verifyAdminToken = async (req, res, next) => {
     return res.status(500).json({ success: false, message: 'Authentication error' });
   }
 };
+
+// =============================================================================
+// APPLY RATE LIMITERS TO ROUTES (must be before route handlers)
+// =============================================================================
+
+// Public endpoints - IP-based rate limiting
+app.use('/api/health', publicLimiter);
+app.use('/api/stats', publicLimiter);
+app.use('/api/auth/public', publicLimiter);
+
+// Auth endpoints - strict IP-based rate limiting (brute force / spam protection)
+app.use('/api/auth/vendor/login', loginLimiter);
+app.use('/api/auth/vendor/register', registerLimiter);
+app.use('/api/auth/customer/login', loginLimiter);
+app.use('/api/auth/customer/register', registerLimiter);
+
+// Authenticated API routes - user-based rate limiting (each user gets full quota)
+app.use('/api/vendor', authenticatedLimiter);
+app.use('/api/analytics', authenticatedLimiter);
+
+// Customer routes - session-based rate limiting
+app.use('/api/customer', customerLimiter);
 
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
@@ -296,21 +385,6 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-// Rate limiting for public endpoints (more permissive but still protected)
-const publicWindowMs = 60 * 1000;
-const publicLimiter = rateLimit({
-  windowMs: publicWindowMs,
-  max: 30, // 30 requests per minute
-  message: { success: false, message: 'Too many requests, please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  store: createRateLimitStore(publicWindowMs),
-});
-
-// Apply rate limiting to public endpoints
-app.use('/api/stats', publicLimiter);
-app.use('/api/auth/public', publicLimiter);
-
 // Admin DB info endpoint (protected)
 app.get('/api/admin/db-info', verifyAdminToken, async (req, res) => {
   const { pool } = require('./config/database');
@@ -375,15 +449,8 @@ app.get('/api/admin/email-scheduler-stats', verifyAdminToken, async (req, res) =
   }
 });
 
-// API routes with auth-specific rate limiters
+// API routes
 const authRouter = require('./routes/auth');
-
-// Apply strict rate limiting to auth endpoints
-app.use('/api/auth/vendor/login', loginLimiter);
-app.use('/api/auth/vendor/register', registerLimiter);
-app.use('/api/auth/customer/login', loginLimiter);
-app.use('/api/auth/customer/register', registerLimiter);
-
 app.use('/api/auth', authRouter);
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
