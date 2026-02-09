@@ -395,10 +395,155 @@ router.post('/vendor/google', async (req, res) => {
       },
     });
   } catch (error) {
-    logger.error('Google OAuth error', { error: error.message });
+    logger.error('Google OAuth error', { error: error.message, stack: error.stack });
     res.status(500).json({
       success: false,
       message: 'Error processing Google sign-in',
+      ...(process.env.NODE_ENV === 'development' && { details: error.message }),
+    });
+  }
+});
+
+/**
+ * POST /api/auth/vendor/google/callback
+ * Exchange Google OAuth authorization code for tokens (for Safari/redirect flow)
+ */
+router.post('/vendor/google/callback', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      code: Joi.string().required(),
+      redirectUri: Joi.string().uri().required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { code, redirectUri } = value;
+
+    // Exchange authorization code for tokens
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (tokenData.error) {
+      logger.warn('Google token exchange failed', { error: tokenData.error_description || tokenData.error });
+      return res.status(401).json({
+        success: false,
+        message: tokenData.error_description || 'Failed to exchange authorization code',
+      });
+    }
+
+    const { id_token: idToken } = tokenData;
+
+    // Verify the ID token
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (googleError) {
+      logger.warn('Google token verification failed', { error: googleError.message });
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid Google credential',
+      });
+    }
+
+    const { sub: googleId, email, name, picture } = payload;
+
+    // Check if user exists by Google ID
+    let user = await User.findByGoogleId(googleId);
+
+    if (!user) {
+      // Check if user exists by email
+      const existingUser = await User.findByEmail(email);
+
+      if (existingUser) {
+        if (existingUser.role === 'vendor') {
+          await User.linkGoogleAccount(existingUser.id, { googleId, avatarUrl: picture });
+          user = await User.findById(existingUser.id);
+        } else {
+          return res.status(400).json({
+            success: false,
+            message: 'This email is already registered as a customer account',
+          });
+        }
+      } else {
+        // Create new vendor user
+        user = await User.createVendorFromGoogle({
+          googleId,
+          email,
+          fullName: name,
+          avatarUrl: picture,
+        });
+      }
+    }
+
+    if (user.role !== 'vendor') {
+      return res.status(403).json({
+        success: false,
+        message: 'Google sign-in is only available for vendor accounts',
+      });
+    }
+
+    // Update last login timestamp
+    query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]).catch(err => {
+      logger.error('Error updating last_login_at', { error: err.message });
+    });
+
+    // Generate JWT access token (consistent 1h expiry)
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+    );
+
+    // Generate refresh token
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+    // Store refresh token
+    await RefreshToken.create(user.id, refreshTokenHash, refreshExpiresAt);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        token,
+        refreshToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          role: user.role,
+          avatarUrl: user.avatar_url,
+        },
+      },
+    });
+  } catch (error) {
+    logger.error('Google OAuth callback error', { error: error.message, stack: error.stack });
+    res.status(500).json({
+      success: false,
+      message: 'Error processing Google sign-in',
+      ...(process.env.NODE_ENV === 'development' && { details: error.message }),
     });
   }
 });

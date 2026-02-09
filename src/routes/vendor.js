@@ -669,13 +669,23 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
       });
     }
 
+    // Get inventory with performance history counts from product_performance_log
     const result = await query(
       `SELECT mp.id, mp.machine_id, mp.product_id, mp.current_stock,
               mp.is_performing, mp.performance_marked_at, mp.expiration_date,
               mp.expiration_date - CURRENT_DATE as days_until_expiration,
-              p.product_name, p.description, p.price, p.image_url, p.category
+              p.product_name, p.description, p.price, p.image_url, p.category,
+              COALESCE(ph.yes_count, 0)::int as performance_yes_count,
+              COALESCE(ph.no_count, 0)::int as performance_no_count
        FROM machine_products mp
        JOIN products p ON mp.product_id = p.id
+       LEFT JOIN (
+         SELECT machine_product_id,
+                COUNT(*) FILTER (WHERE is_performing = true) as yes_count,
+                COUNT(*) FILTER (WHERE is_performing = false) as no_count
+         FROM product_performance_log
+         GROUP BY machine_product_id
+       ) ph ON mp.id = ph.machine_product_id
        WHERE mp.machine_id = $1 AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
        ORDER BY p.product_name`,
       [machineId]

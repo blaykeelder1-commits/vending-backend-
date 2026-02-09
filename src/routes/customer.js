@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const Joi = require('joi');
 const { query, transaction } = require('../config/database');
 const analyticsService = require('../services/analyticsService');
@@ -14,6 +15,8 @@ router.post('/set-machine', async (req, res) => {
   try {
     const schema = Joi.object({
       machineId: Joi.number().integer().required(),
+      screenResolution: Joi.string().max(20).optional(),
+      timezone: Joi.string().max(50).optional(),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -24,7 +27,11 @@ router.post('/set-machine', async (req, res) => {
       });
     }
 
-    const { machineId } = value;
+    const { machineId, screenResolution, timezone } = value;
+
+    // Compute device fingerprint from IP + user-agent + screen resolution
+    const fingerprintSource = `${req.ip}|${req.get('user-agent') || ''}|${screenResolution || ''}`;
+    const deviceFingerprint = crypto.createHash('sha256').update(fingerprintSource).digest('hex').substring(0, 64);
 
     // Verify machine exists and is active
     const machineCheck = await query(
@@ -40,14 +47,14 @@ router.post('/set-machine', async (req, res) => {
     }
 
     // Create anonymous session
-    const sessionToken = require('crypto').randomUUID();
+    const sessionToken = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
     const sessionResult = await query(
-      `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent)
-       VALUES ($1, $2, $3, true, $4, $5)
+      `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent, device_fingerprint, screen_resolution, timezone)
+       VALUES ($1, $2, $3, true, $4, $5, $6, $7, $8)
        RETURNING id`,
-      [machineId, sessionToken, expiresAt, req.ip, req.get('user-agent')]
+      [machineId, sessionToken, expiresAt, req.ip, req.get('user-agent'), deviceFingerprint, screenResolution || null, timezone || null]
     );
 
     const sessionId = sessionResult.rows[0].id;
@@ -207,6 +214,61 @@ router.get('/machine', verifySession, async (req, res) => {
 // ========================================
 // SWIPE POLL ROUTES (Tinder-style voting)
 // ========================================
+
+/**
+ * GET /api/customer/polls/check-completion
+ * Check if this session or device fingerprint already completed the active poll
+ */
+router.get('/polls/check-completion', verifySession, async (req, res) => {
+  try {
+    const { machineId } = req.session;
+    const sessionId = req.session.id;
+
+    // Get active poll for this machine
+    const pollResult = await query(
+      `SELECT id FROM polls WHERE machine_id = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1`,
+      [machineId]
+    );
+
+    if (pollResult.rows.length === 0) {
+      return res.json({ success: true, data: { completed: false } });
+    }
+
+    const pollId = pollResult.rows[0].id;
+
+    // Check by session ID first
+    const sessionCheck = await query(
+      `SELECT id FROM poll_completions WHERE poll_id = $1 AND session_id = $2`,
+      [pollId, sessionId]
+    );
+
+    if (sessionCheck.rows.length > 0) {
+      return res.json({ success: true, data: { completed: true } });
+    }
+
+    // Check by device fingerprint
+    const sessionInfo = await query(
+      `SELECT device_fingerprint FROM customer_sessions WHERE id = $1`,
+      [sessionId]
+    );
+
+    if (sessionInfo.rows.length > 0 && sessionInfo.rows[0].device_fingerprint) {
+      const fingerprintCheck = await query(
+        `SELECT id FROM poll_completions WHERE poll_id = $1 AND device_fingerprint = $2`,
+        [pollId, sessionInfo.rows[0].device_fingerprint]
+      );
+
+      if (fingerprintCheck.rows.length > 0) {
+        return res.json({ success: true, data: { completed: true } });
+      }
+    }
+
+    res.json({ success: true, data: { completed: false } });
+  } catch (error) {
+    logger.error('Error checking poll completion', { error: error.message });
+    res.status(500).json({ success: false, message: 'Error checking poll completion' });
+  }
+});
 
 /**
  * GET /api/customer/polls
@@ -489,6 +551,26 @@ router.post('/polls/:pollId/vote', verifySession, async (req, res) => {
     );
 
     const remaining = parseInt(remainingResult.rows[0].remaining);
+
+    // Record poll completion when all products have been voted on
+    if (remaining === 0) {
+      try {
+        const sessionInfo = await query(
+          `SELECT device_fingerprint FROM customer_sessions WHERE id = $1`,
+          [sessionId]
+        );
+        const fingerprint = sessionInfo.rows[0]?.device_fingerprint || null;
+
+        await query(
+          `INSERT INTO poll_completions (poll_id, session_id, device_fingerprint)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (poll_id, session_id) DO NOTHING`,
+          [pollId, sessionId, fingerprint]
+        );
+      } catch (completionErr) {
+        logger.error('Error recording poll completion', { error: completionErr.message });
+      }
+    }
 
     res.json({
       success: true,
