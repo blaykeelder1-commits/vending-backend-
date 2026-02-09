@@ -135,4 +135,44 @@ function createRateLimitStore(windowMs) {
   return undefined;
 }
 
-module.exports = { redis, cache, createRateLimitStore };
+/**
+ * Create a key generator for rate limiting that uses user ID for authenticated requests
+ * and falls back to IP for unauthenticated requests.
+ *
+ * @param {string} prefix - Prefix for the rate limit key (e.g., 'auth', 'public')
+ * @returns {function} Key generator function for express-rate-limit
+ */
+function createKeyGenerator(prefix = 'rl') {
+  const jwt = require('jsonwebtoken');
+
+  return (req, res) => {
+    // Try to extract user ID from JWT token
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.userId || decoded.id) {
+          const userId = decoded.userId || decoded.id;
+          return `${prefix}:user:${userId}`;
+        }
+      } catch (error) {
+        // Token invalid or expired, fall back to IP
+      }
+    }
+
+    // Check for customer session token (for customer endpoints)
+    const sessionToken = req.headers['x-session-token'] || req.query.sessionToken;
+    if (sessionToken) {
+      return `${prefix}:session:${sessionToken}`;
+    }
+
+    // Fall back to IP address using express-rate-limit's built-in helper for IPv6 normalization
+    // This prevents IPv6 users from bypassing limits
+    const { ipKeyGenerator } = require('express-rate-limit');
+    const ip = ipKeyGenerator(req, res);
+    return `${prefix}:ip:${ip}`;
+  };
+}
+
+module.exports = { redis, cache, createRateLimitStore, createKeyGenerator };
