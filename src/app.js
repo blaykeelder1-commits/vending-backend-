@@ -111,6 +111,7 @@ const authenticatedLimiter = rateLimit({
   keyGenerator: createKeyGenerator('auth'),
   handler: (req, res, next, options) => {
     logRateLimitViolation(req, 'authenticated');
+    res.set('Retry-After', String(Math.ceil(authWindowMs / 1000)));
     res.status(options.statusCode).json(options.message);
   },
 });
@@ -128,37 +129,41 @@ const customerLimiter = rateLimit({
   keyGenerator: createKeyGenerator('customer'),
   handler: (req, res, next, options) => {
     logRateLimitViolation(req, 'customer');
+    res.set('Retry-After', String(Math.ceil(customerWindowMs / 1000)));
     res.status(options.statusCode).json(options.message);
   },
 });
 
-// 3. Public endpoints limiter - 300 req/min per IP
+// 3. Public endpoints limiter - 500 req/min per IP (increased for mobile carrier NAT)
 // For: /api/stats, /api/health, unauthenticated discovery
 const publicWindowMs = 60 * 1000;
 const publicLimiter = rateLimit({
   windowMs: publicWindowMs,
-  max: 300,
+  max: 500,
   message: { success: false, message: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
   store: createRateLimitStore(publicWindowMs),
   handler: (req, res, next, options) => {
     logRateLimitViolation(req, 'public');
+    res.set('Retry-After', String(Math.ceil(publicWindowMs / 1000)));
     res.status(options.statusCode).json(options.message);
   },
 });
 
-// 4. Login limiter - 20 req/min per IP (brute force protection)
+// 4. Login limiter - 50 req/min per IP (brute force protection, higher for mobile carrier NAT)
 const loginWindowMs = 60 * 1000;
 const loginLimiter = rateLimit({
   windowMs: loginWindowMs,
-  max: 20,
+  max: 50,
   message: { success: false, message: 'Too many login attempts, please try again in a minute.' },
   standardHeaders: true,
   legacyHeaders: false,
   store: createRateLimitStore(loginWindowMs),
   handler: (req, res, next, options) => {
     logRateLimitViolation(req, 'login');
+    const retryAfterSecs = Math.ceil(loginWindowMs / 1000);
+    res.set('Retry-After', String(retryAfterSecs));
     res.status(options.statusCode).json(options.message);
   },
 });
@@ -174,6 +179,7 @@ const registerLimiter = rateLimit({
   store: createRateLimitStore(registerWindowMs),
   handler: (req, res, next, options) => {
     logRateLimitViolation(req, 'register');
+    res.set('Retry-After', String(Math.ceil(registerWindowMs / 1000)));
     res.status(options.statusCode).json(options.message);
   },
 });
