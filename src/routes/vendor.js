@@ -1850,6 +1850,58 @@ router.get('/poll-summary', async (req, res) => {
 });
 
 // ========================================
+// SHOPPING LIST (Performance-Based)
+// ========================================
+
+/**
+ * GET /api/vendor/shopping-list
+ * Products performing well across all machines, based on vendor performance marks
+ */
+router.get('/shopping-list', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const result = await query(
+      `SELECT
+         p.product_name,
+         p.category,
+         COUNT(*) FILTER (WHERE ppl.is_performing = true) as total_yes,
+         COUNT(*) FILTER (WHERE ppl.is_performing = false) as total_no,
+         COUNT(*) as total_marks,
+         COUNT(DISTINCT mp.machine_id) as machine_count,
+         ROUND(
+           COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)
+         ) as approval_rate
+       FROM product_performance_log ppl
+       JOIN machine_products mp ON ppl.machine_product_id = mp.id
+       JOIN products p ON mp.product_id = p.id
+       JOIN vending_machines vm ON mp.machine_id = vm.id
+       WHERE vm.vendor_id = $1
+         AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+       GROUP BY p.id, p.product_name, p.category
+       HAVING COUNT(*) >= 5 AND COUNT(*) FILTER (WHERE ppl.is_performing = true) >= 1
+       ORDER BY COUNT(*) FILTER (WHERE ppl.is_performing = true) DESC,
+                ROUND(COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)) DESC`,
+      [vendorId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        products: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    logger.error('Error fetching shopping list', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching shopping list',
+    });
+  }
+});
+
+// ========================================
 // PRODUCT REDISTRIBUTION ROUTES
 // ========================================
 
