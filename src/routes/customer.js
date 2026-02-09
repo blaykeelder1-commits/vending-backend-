@@ -8,8 +8,247 @@ const logger = require('../utils/logger');
 const router = express.Router();
 
 /**
+ * Helper: compute the start of the current poll period (most recent 15th)
+ */
+function getPollPeriodStart() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  if (now.getDate() >= 15) {
+    return new Date(year, month, 15, 0, 0, 0, 0);
+  }
+  // Before the 15th → period started on the 15th of previous month
+  return new Date(year, month - 1, 15, 0, 0, 0, 0);
+}
+
+/**
+ * Helper: compute the next poll refresh date (next 15th)
+ */
+function getNextPollDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  if (now.getDate() < 15) {
+    return new Date(year, month, 15, 0, 0, 0, 0);
+  }
+  return new Date(year, month + 1, 15, 0, 0, 0, 0);
+}
+
+/**
+ * POST /api/customer/init-session
+ * Combined endpoint: resolve QR → create session → check completion → load polls
+ * Reduces 4 sequential round trips to 1
+ */
+router.post('/init-session', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      qr_token: Joi.string().required(),
+      screenResolution: Joi.string().max(20).optional(),
+      timezone: Joi.string().max(50).optional(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ success: false, message: error.details[0].message });
+    }
+
+    const { qr_token, screenResolution, timezone } = value;
+
+    // 1. Resolve QR token to machine (includes vendor_id to avoid second query)
+    const machineResult = await query(
+      'SELECT id, machine_name, location, vendor_id FROM vending_machines WHERE qr_token = $1 AND is_active = true',
+      [qr_token]
+    );
+
+    if (machineResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Machine not found or inactive' });
+    }
+
+    const machine = machineResult.rows[0];
+    const machineId = machine.id;
+
+    // 2. Create session
+    const fingerprintSource = `${req.ip}|${req.get('user-agent') || ''}|${screenResolution || ''}`;
+    const deviceFingerprint = crypto.createHash('sha256').update(fingerprintSource).digest('hex').substring(0, 64);
+    const sessionToken = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+    const sessionResult = await query(
+      `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent, device_fingerprint, screen_resolution, timezone)
+       VALUES ($1, $2, $3, true, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [machineId, sessionToken, expiresAt, req.ip, req.get('user-agent'), deviceFingerprint, screenResolution || null, timezone || null]
+    );
+
+    const sessionId = sessionResult.rows[0].id;
+
+    // Track QR scan (fire and forget)
+    analyticsService.trackEvent({
+      eventType: 'qr_scan',
+      machineId,
+      vendorId: machine.vendor_id,
+      sessionId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    // 3. Check poll completion + load poll in parallel-friendly way
+    //    Single query: get active poll AND check if completed by this fingerprint this period
+    const periodStart = getPollPeriodStart();
+    const nextPollDate = getNextPollDate();
+
+    const pollCheckResult = await query(
+      `SELECT p.id, p.poll_question as question, p.created_at, p.poll_type, p.is_auto_generated,
+              EXISTS(
+                SELECT 1 FROM poll_completions pc
+                WHERE pc.poll_id = p.id
+                  AND (pc.session_id = $2 OR pc.device_fingerprint = $3)
+                  AND pc.completed_at >= $4
+              ) as already_completed
+       FROM polls p
+       WHERE p.machine_id = $1 AND p.is_active = true
+       ORDER BY p.created_at DESC
+       LIMIT 1`,
+      [machineId, sessionId, deviceFingerprint, periodStart]
+    );
+
+    let poll = pollCheckResult.rows[0];
+    const alreadyVoted = poll?.already_completed || false;
+
+    // If already voted, return early with minimal data
+    if (alreadyVoted) {
+      return res.json({
+        success: true,
+        data: {
+          sessionToken,
+          machine: { id: machine.id, machine_name: machine.machine_name, location: machine.location },
+          alreadyVoted: true,
+          nextPollDate: nextPollDate.toISOString(),
+          poll: null,
+          products: [],
+        },
+      });
+    }
+
+    // 4. Load or auto-generate poll
+    if (!poll) {
+      // Auto-generate poll from machine products
+      const underperformersResult = await query(
+        `SELECT mp.id as machine_product_id, mp.product_id, p.product_name, p.image_url
+         FROM machine_products mp
+         JOIN products p ON mp.product_id = p.id
+         WHERE mp.machine_id = $1 AND (mp.is_performing = false OR mp.is_performing IS NULL) AND p.is_active = true
+         ORDER BY mp.is_performing ASC NULLS LAST, p.product_name LIMIT 20`,
+        [machineId]
+      );
+
+      let productsToShow = underperformersResult.rows;
+
+      if (productsToShow.length === 0) {
+        const anyProducts = await query(
+          `SELECT mp.id as machine_product_id, mp.product_id, p.product_name, p.image_url
+           FROM machine_products mp JOIN products p ON mp.product_id = p.id
+           WHERE mp.machine_id = $1 AND p.is_active = true
+           ORDER BY p.product_name LIMIT 20`,
+          [machineId]
+        );
+        productsToShow = anyProducts.rows;
+      }
+
+      if (productsToShow.length < 2) {
+        return res.json({
+          success: true,
+          data: {
+            sessionToken,
+            machine: { id: machine.id, machine_name: machine.machine_name, location: machine.location },
+            alreadyVoted: false,
+            poll: null,
+            products: [],
+            message: 'Not enough products for a poll',
+          },
+        });
+      }
+
+      // Create auto-poll with batch insert for options
+      poll = await transaction(async (client) => {
+        await client.query(
+          `UPDATE polls SET is_active = false, closed_at = NOW()
+           WHERE machine_id = $1 AND is_auto_generated = true AND is_active = true`,
+          [machineId]
+        );
+
+        const pollInsert = await client.query(
+          `INSERT INTO polls (vendor_id, machine_id, poll_question, is_active, poll_type, is_auto_generated)
+           VALUES ($1, $2, 'Which products would you like to see more of?', true, 'performance', true)
+           RETURNING id, poll_question as question, created_at, poll_type, is_auto_generated`,
+          [machine.vendor_id, machineId]
+        );
+
+        const newPoll = pollInsert.rows[0];
+
+        // Batch insert all options in one query
+        const values = productsToShow.map((p, i) =>
+          `($1, $${i * 3 + 2}, $${i * 3 + 3}, $${i * 3 + 4}, ${i + 1})`
+        ).join(', ');
+        const params = [newPoll.id];
+        productsToShow.forEach(p => {
+          params.push(p.product_name, p.image_url, p.product_id);
+        });
+
+        await client.query(
+          `INSERT INTO poll_options (poll_id, option_text, image_url, product_id, display_order)
+           VALUES ${values}`,
+          params
+        );
+
+        return newPoll;
+      });
+    }
+
+    // 5. Get poll options (unvoted only)
+    const optionsResult = await query(
+      `SELECT po.id, po.option_text as product_name, po.image_url, po.display_order,
+              CASE WHEN pv.id IS NOT NULL THEN pv.vote_type ELSE NULL END as user_vote
+       FROM poll_options po
+       LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id AND pv.session_id = $2
+       WHERE po.poll_id = $1
+       ORDER BY po.display_order`,
+      [poll.id, sessionId]
+    );
+
+    const unvotedOptions = optionsResult.rows.filter(opt => opt.user_vote === null);
+    const votedCount = optionsResult.rows.length - unvotedOptions.length;
+
+    res.json({
+      success: true,
+      data: {
+        sessionToken,
+        machine: { id: machine.id, machine_name: machine.machine_name, location: machine.location },
+        alreadyVoted: false,
+        nextPollDate: nextPollDate.toISOString(),
+        poll: {
+          id: poll.id,
+          question: poll.question,
+          createdAt: poll.created_at,
+          pollType: poll.poll_type || 'performance',
+          isAutoGenerated: poll.is_auto_generated || false,
+        },
+        products: unvotedOptions,
+        totalProducts: optionsResult.rows.length,
+        votedCount,
+        remainingCount: unvotedOptions.length,
+      },
+    });
+  } catch (error) {
+    logger.error('Error in init-session', { error: error.message });
+    res.status(500).json({ success: false, message: 'Error initializing session' });
+  }
+});
+
+/**
  * POST /api/customer/set-machine
  * Set machine session from QR code scan (anonymous)
+ * (Legacy endpoint - kept for backwards compatibility)
  */
 router.post('/set-machine', async (req, res) => {
   try {
@@ -35,7 +274,7 @@ router.post('/set-machine', async (req, res) => {
 
     // Verify machine exists and is active
     const machineCheck = await query(
-      'SELECT id, machine_name, location FROM vending_machines WHERE id = $1 AND is_active = true',
+      'SELECT id, machine_name, location, vendor_id FROM vending_machines WHERE id = $1 AND is_active = true',
       [machineId]
     );
 
@@ -48,7 +287,7 @@ router.post('/set-machine', async (req, res) => {
 
     // Create anonymous session
     const sessionToken = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
     const sessionResult = await query(
       `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent, device_fingerprint, screen_resolution, timezone)
@@ -59,23 +298,15 @@ router.post('/set-machine', async (req, res) => {
 
     const sessionId = sessionResult.rows[0].id;
 
-    // Get vendor ID for analytics tracking
-    const vendorResult = await query(
-      'SELECT vendor_id FROM vending_machines WHERE id = $1',
-      [machineId]
-    );
-
-    // Track QR scan event
-    if (vendorResult.rows.length > 0) {
-      analyticsService.trackEvent({
-        eventType: 'qr_scan',
-        machineId,
-        vendorId: vendorResult.rows[0].vendor_id,
-        sessionId,
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent'),
-      });
-    }
+    // Track QR scan event (fire and forget)
+    analyticsService.trackEvent({
+      eventType: 'qr_scan',
+      machineId,
+      vendorId: machineCheck.rows[0].vendor_id,
+      sessionId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     res.json({
       success: true,
@@ -223,47 +454,28 @@ router.get('/polls/check-completion', verifySession, async (req, res) => {
   try {
     const { machineId } = req.session;
     const sessionId = req.session.id;
+    const periodStart = getPollPeriodStart();
 
-    // Get active poll for this machine
-    const pollResult = await query(
-      `SELECT id FROM polls WHERE machine_id = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1`,
-      [machineId]
+    // Single query: check completion by session ID or device fingerprint within current period
+    const result = await query(
+      `SELECT EXISTS(
+        SELECT 1 FROM poll_completions pc
+        JOIN polls p ON pc.poll_id = p.id
+        JOIN customer_sessions cs ON cs.id = $2
+        WHERE p.machine_id = $1 AND p.is_active = true
+          AND (pc.session_id = $2 OR pc.device_fingerprint = cs.device_fingerprint)
+          AND pc.completed_at >= $3
+      ) as completed`,
+      [machineId, sessionId, periodStart]
     );
 
-    if (pollResult.rows.length === 0) {
-      return res.json({ success: true, data: { completed: false } });
-    }
-
-    const pollId = pollResult.rows[0].id;
-
-    // Check by session ID first
-    const sessionCheck = await query(
-      `SELECT id FROM poll_completions WHERE poll_id = $1 AND session_id = $2`,
-      [pollId, sessionId]
-    );
-
-    if (sessionCheck.rows.length > 0) {
-      return res.json({ success: true, data: { completed: true } });
-    }
-
-    // Check by device fingerprint
-    const sessionInfo = await query(
-      `SELECT device_fingerprint FROM customer_sessions WHERE id = $1`,
-      [sessionId]
-    );
-
-    if (sessionInfo.rows.length > 0 && sessionInfo.rows[0].device_fingerprint) {
-      const fingerprintCheck = await query(
-        `SELECT id FROM poll_completions WHERE poll_id = $1 AND device_fingerprint = $2`,
-        [pollId, sessionInfo.rows[0].device_fingerprint]
-      );
-
-      if (fingerprintCheck.rows.length > 0) {
-        return res.json({ success: true, data: { completed: true } });
-      }
-    }
-
-    res.json({ success: true, data: { completed: false } });
+    res.json({
+      success: true,
+      data: {
+        completed: result.rows[0].completed,
+        nextPollDate: getNextPollDate().toISOString(),
+      },
+    });
   } catch (error) {
     logger.error('Error checking poll completion', { error: error.message });
     res.status(500).json({ success: false, message: 'Error checking poll completion' });
