@@ -87,7 +87,7 @@ class RedisRateLimitStore {
 
     const redisKey = this.prefix + key;
     try {
-      const [[, totalHits], [, ttl]] = await redis.pipeline()
+      const [totalHits, ttl] = await redis.pipeline()
         .incr(redisKey)
         .pttl(redisKey)
         .exec();
@@ -168,9 +168,9 @@ function createKeyGenerator(prefix = 'rl') {
     }
 
     // Fall back to IP address using express-rate-limit's built-in helper for IPv6 normalization
-    // This prevents IPv6 users from bypassing limits
+    // ipKeyGenerator(ip, ipv6Subnet) normalizes IPv6 addresses to prevent bypass
     const { ipKeyGenerator } = require('express-rate-limit');
-    const ip = ipKeyGenerator(req, res);
+    const ip = ipKeyGenerator(req.ip);
     return `${prefix}:ip:${ip}`;
   };
 }
