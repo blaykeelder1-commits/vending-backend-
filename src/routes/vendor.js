@@ -1001,6 +1001,145 @@ router.put('/machines/:machineId/inventory/:id/performance', async (req, res) =>
 });
 
 /**
+ * POST /api/vendor/machines/:machineId/performance-commit
+ * Batch commit all performance marks for a visit
+ */
+router.post('/machines/:machineId/performance-commit', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const schema = Joi.object({
+      marks: Joi.array().items(
+        Joi.object({
+          inventoryId: Joi.number().integer().required(),
+          isPerforming: Joi.boolean().required(),
+        })
+      ).min(1).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    // Verify machine belongs to vendor
+    const machineCheck = await query(
+      'SELECT id, machine_name FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vending machine not found',
+      });
+    }
+
+    const { marks } = value;
+
+    const result = await transaction(async (client) => {
+      // Verify all inventory IDs belong to this machine and get product names
+      const inventoryIds = marks.map(m => m.inventoryId);
+      const inventoryCheck = await client.query(
+        `SELECT mp.id, mp.product_id, p.product_name
+         FROM machine_products mp
+         JOIN products p ON mp.product_id = p.id
+         WHERE mp.id = ANY($1) AND mp.machine_id = $2
+           AND (mp.is_deleted = false OR mp.is_deleted IS NULL)`,
+        [inventoryIds, machineId]
+      );
+
+      if (inventoryCheck.rows.length !== inventoryIds.length) {
+        throw new Error('One or more inventory items not found in this machine');
+      }
+
+      const inventoryMap = {};
+      for (const row of inventoryCheck.rows) {
+        inventoryMap[row.id] = row;
+      }
+
+      // Process each mark: log to performance_log, then reset is_performing to NULL
+      for (const mark of marks) {
+        const item = inventoryMap[mark.inventoryId];
+
+        // Insert into performance log
+        await client.query(
+          `INSERT INTO product_performance_log (machine_product_id, is_performing, marked_by)
+           VALUES ($1, $2, $3)`,
+          [mark.inventoryId, mark.isPerforming, req.user.id]
+        );
+
+        // Update performance_marked_at, then reset is_performing to NULL
+        await client.query(
+          `UPDATE machine_products
+           SET is_performing = NULL, performance_marked_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [mark.inventoryId]
+        );
+      }
+
+      // Log to machine_history
+      const details = marks.map(m => ({
+        inventory_id: m.inventoryId,
+        product_id: inventoryMap[m.inventoryId].product_id,
+        product_name: inventoryMap[m.inventoryId].product_name,
+        is_performing: m.isPerforming,
+      }));
+
+      await client.query(
+        `INSERT INTO machine_history (machine_id, vendor_id, action_type, details)
+         VALUES ($1, $2, $3, $4)`,
+        [machineId, req.user.id, 'performance_commit', JSON.stringify({ marks: details })]
+      );
+
+      // Update last_visit_at
+      await client.query(
+        `UPDATE vending_machines SET last_visit_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [machineId]
+      );
+
+      // Return updated inventory with tally counts
+      const updatedInventory = await client.query(
+        `SELECT mp.id, mp.machine_id, mp.product_id, mp.current_stock,
+                mp.is_performing, mp.performance_marked_at, mp.expiration_date,
+                mp.expiration_date - CURRENT_DATE as days_until_expiration,
+                p.product_name, p.description, p.price, p.image_url, p.category,
+                COALESCE(ph.yes_count, 0)::int as performance_yes_count,
+                COALESCE(ph.no_count, 0)::int as performance_no_count
+         FROM machine_products mp
+         JOIN products p ON mp.product_id = p.id
+         LEFT JOIN (
+           SELECT machine_product_id,
+                  COUNT(*) FILTER (WHERE is_performing = true) as yes_count,
+                  COUNT(*) FILTER (WHERE is_performing = false) as no_count
+           FROM product_performance_log
+           GROUP BY machine_product_id
+         ) ph ON mp.id = ph.machine_product_id
+         WHERE mp.machine_id = $1 AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+         ORDER BY p.product_name`,
+        [machineId]
+      );
+
+      return updatedInventory.rows;
+    });
+
+    res.json({
+      success: true,
+      message: `Visit committed: ${marks.length} product(s) marked`,
+      data: { inventory: result },
+    });
+  } catch (error) {
+    logger.error('Error committing performance visit', { error: error.message });
+    res.status(error.message.includes('not found') ? 400 : 500).json({
+      success: false,
+      message: error.message || 'Error committing performance visit',
+    });
+  }
+});
+
+/**
  * DELETE /api/vendor/machines/:machineId/inventory/:id
  * Remove a product from machine inventory
  */
