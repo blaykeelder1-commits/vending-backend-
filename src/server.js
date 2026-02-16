@@ -81,7 +81,7 @@ cron.schedule('0 * * * *', async () => {
     // Clean up expired sessions
     try {
       const result = await pool.query(
-        'DELETE FROM customer_sessions WHERE expires_at < NOW()'
+        'DELETE FROM customer_sessions WHERE id IN (SELECT id FROM customer_sessions WHERE expires_at < NOW() LIMIT 5000)'
       );
       logger.info('Cron: Session cleanup complete', { expiredSessions: result.rowCount });
     } catch (error) {

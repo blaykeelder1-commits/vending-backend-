@@ -40,6 +40,19 @@ async function updateLastVisit(machineId) {
   }
 }
 
+// Helper: Verify machine belongs to vendor (returns true or sends 404 response)
+async function verifyMachineOwnership(machineId, vendorId, res) {
+  const result = await query(
+    'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+    [machineId, vendorId]
+  );
+  if (result.rows.length === 0) {
+    res.status(404).json({ success: false, message: 'Vending machine not found' });
+    return false;
+  }
+  return true;
+}
+
 // ========================================
 // VENDING MACHINES ROUTES
 // ========================================
@@ -237,17 +250,7 @@ router.put('/machines/:id', async (req, res) => {
     }
 
     // Check machine exists and belongs to vendor
-    const checkResult = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [id, req.user.id]
-    );
-
-    if (checkResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(id, req.user.id, res)) return;
 
     // Build update query dynamically
     const updates = [];
@@ -684,6 +687,7 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
                 COUNT(*) FILTER (WHERE is_performing = true) as yes_count,
                 COUNT(*) FILTER (WHERE is_performing = false) as no_count
          FROM product_performance_log
+         WHERE machine_product_id IN (SELECT id FROM machine_products WHERE machine_id = $1)
          GROUP BY machine_product_id
        ) ph ON mp.id = ph.machine_product_id
        WHERE mp.machine_id = $1 AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
@@ -743,17 +747,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
     }
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, req.user.id, res)) return;
 
     // Check inventory limit (40 products max)
     const countCheck = await query(
@@ -848,17 +842,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     }
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, req.user.id, res)) return;
 
     // Build update query
     const updates = [];
@@ -924,17 +908,7 @@ router.put('/machines/:machineId/inventory/:id/performance', async (req, res) =>
     }
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, req.user.id, res)) return;
 
     const { isPerforming, notes } = value;
 
@@ -1115,6 +1089,7 @@ router.post('/machines/:machineId/performance-commit', async (req, res) => {
                   COUNT(*) FILTER (WHERE is_performing = true) as yes_count,
                   COUNT(*) FILTER (WHERE is_performing = false) as no_count
            FROM product_performance_log
+           WHERE machine_product_id IN (SELECT id FROM machine_products WHERE machine_id = $1)
            GROUP BY machine_product_id
          ) ph ON mp.id = ph.machine_product_id
          WHERE mp.machine_id = $1 AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
@@ -1148,17 +1123,7 @@ router.delete('/machines/:machineId/inventory/:id', async (req, res) => {
     const { machineId, id } = req.params;
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, req.user.id]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Vending machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, req.user.id, res)) return;
 
     // Get product info before deletion for history logging
     const productInfo = await query(
@@ -1507,17 +1472,7 @@ router.post('/machines/:machineId/polls', async (req, res) => {
     const { question, pollType, products } = value;
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, vendorId]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, vendorId, res)) return;
 
     // Deactivate any existing active polls for this machine
     await query(
@@ -2254,17 +2209,7 @@ router.put('/machines/:id/notes', async (req, res) => {
     }
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [id, vendorId]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(id, vendorId, res)) return;
 
     // Update notes
     const result = await query(
@@ -2417,17 +2362,7 @@ router.get('/machines/:machineId/history', async (req, res) => {
     const vendorId = req.user.id;
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, vendorId]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, vendorId, res)) return;
 
     const result = await query(
       `SELECT id, action_type, details, created_at
@@ -2674,17 +2609,7 @@ router.put('/machines/:machineId/inventory/:id/expiration', async (req, res) => 
     }
 
     // Verify machine belongs to vendor
-    const machineCheck = await query(
-      'SELECT id FROM vending_machines WHERE id = $1 AND vendor_id = $2',
-      [machineId, vendorId]
-    );
-
-    if (machineCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Machine not found',
-      });
-    }
+    if (!await verifyMachineOwnership(machineId, vendorId, res)) return;
 
     // Update expiration date
     const result = await query(

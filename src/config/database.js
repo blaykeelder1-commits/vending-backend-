@@ -10,7 +10,7 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? {
     rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === 'true'
   } : false,
-  max: parseInt(process.env.DATABASE_POOL_MAX) || 40, // Default pool size for 500+ users
+  max: parseInt(process.env.DATABASE_POOL_MAX) || 60, // Default pool size for 500+ users
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 20000,
   statement_timeout: parseInt(process.env.DATABASE_STATEMENT_TIMEOUT) || 30000, // 30s query timeout

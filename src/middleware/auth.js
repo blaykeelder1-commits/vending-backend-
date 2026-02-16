@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { query } = require('../config/database');
+const { cache } = require('../config/redis');
 const logger = require('../utils/logger');
 
 // Verify JWT token for vendor authentication
@@ -19,6 +20,21 @@ const verifyToken = async (req, res, next) => {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // Check Redis cache first (60s TTL)
+    const cacheKey = `user:${decoded.id}`;
+    const cached = await cache.get(cacheKey);
+    if (cached) {
+      const userData = typeof cached === 'string' ? JSON.parse(cached) : cached;
+      if (userData.role !== 'vendor') {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token or user not found.',
+        });
+      }
+      req.user = { id: userData.id, email: userData.email, role: userData.role };
+      return next();
+    }
+
     // Check if user exists and is a vendor
     const result = await query(
       'SELECT id, email, role FROM users WHERE id = $1 AND role = $2',
@@ -31,6 +47,9 @@ const verifyToken = async (req, res, next) => {
         message: 'Invalid token or user not found.',
       });
     }
+
+    // Cache user data for 60 seconds
+    await cache.set(cacheKey, { id: result.rows[0].id, email: result.rows[0].email, role: result.rows[0].role }, 60);
 
     // Attach user to request
     req.user = {
@@ -154,6 +173,19 @@ const protect = async (req, res, next) => {
     // Try JWT first (vendor)
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      // Check Redis cache first (60s TTL) — graceful fallback to DB on miss/error
+      const cacheKey = `user:${decoded.id}`;
+      const cached = await cache.get(cacheKey);
+      if (cached) {
+        const userData = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        req.user = userData;
+        if (userData.role === 'customer') {
+          req.session = { customerId: userData.id };
+        }
+        return next();
+      }
+
       const result = await query(
         'SELECT id, email, full_name, role FROM users WHERE id = $1',
         [decoded.id]
@@ -166,6 +198,8 @@ const protect = async (req, res, next) => {
           fullName: result.rows[0].full_name,
           role: result.rows[0].role,
         };
+        // Cache user data for 60 seconds
+        await cache.set(cacheKey, req.user, 60);
         // For customer JWT tokens, also populate req.session for compatibility
         if (result.rows[0].role === 'customer') {
           req.session = { customerId: result.rows[0].id };

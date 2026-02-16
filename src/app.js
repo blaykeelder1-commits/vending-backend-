@@ -55,8 +55,11 @@ const corsOptions = {
       process.env.FRONTEND_URL,
     ].filter(Boolean);
 
-    // Allow requests with no origin (mobile apps, Postman, etc.)
+    // Allow requests with no origin (mobile apps, Postman, etc.) - dev only
     if (!origin) {
+      if (process.env.NODE_ENV === 'production') {
+        return callback(new Error('Origin header required'));
+      }
       return callback(null, true);
     }
 
@@ -98,12 +101,12 @@ const logRateLimitViolation = (req, limiterName) => {
   });
 };
 
-// 1. Authenticated API limiter - 2500 req/min per USER (not IP)
+// 1. Authenticated API limiter - 5000 req/min per USER (not IP)
 // For: /api/vendor/*, /api/analytics/*
 const authWindowMs = 60 * 1000;
 const authenticatedLimiter = rateLimit({
   windowMs: authWindowMs,
-  max: 2500,
+  max: 5000,
   message: { success: false, message: 'Too many requests, please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -116,12 +119,12 @@ const authenticatedLimiter = rateLimit({
   },
 });
 
-// 2. Customer API limiter - 1000 req/min per SESSION
+// 2. Customer API limiter - 2000 req/min per SESSION
 // For: /api/customer/*
 const customerWindowMs = 60 * 1000;
 const customerLimiter = rateLimit({
   windowMs: customerWindowMs,
-  max: 1000,
+  max: 2000,
   message: { success: false, message: 'Too many requests, please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -134,12 +137,12 @@ const customerLimiter = rateLimit({
   },
 });
 
-// 3. Public endpoints limiter - 500 req/min per IP (increased for mobile carrier NAT)
+// 3. Public endpoints limiter - 1000 req/min per IP (increased for mobile carrier NAT)
 // For: /api/stats, /api/health, unauthenticated discovery
 const publicWindowMs = 60 * 1000;
 const publicLimiter = rateLimit({
   windowMs: publicWindowMs,
-  max: 500,
+  max: 1000,
   message: { success: false, message: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -151,11 +154,11 @@ const publicLimiter = rateLimit({
   },
 });
 
-// 4. Login limiter - 50 req/min per IP (brute force protection, higher for mobile carrier NAT)
+// 4. Login limiter - 100 req/min per IP (brute force protection, higher for mobile carrier NAT)
 const loginWindowMs = 60 * 1000;
 const loginLimiter = rateLimit({
   windowMs: loginWindowMs,
-  max: 50,
+  max: 100,
   message: { success: false, message: 'Too many login attempts, please try again in a minute.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -168,11 +171,11 @@ const loginLimiter = rateLimit({
   },
 });
 
-// 5. Registration limiter - 10 req/hour per IP (spam prevention)
+// 5. Registration limiter - 20 req/hour per IP (spam prevention)
 const registerWindowMs = 60 * 60 * 1000;
 const registerLimiter = rateLimit({
   windowMs: registerWindowMs,
-  max: 10,
+  max: 20,
   message: { success: false, message: 'Too many registration attempts, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
