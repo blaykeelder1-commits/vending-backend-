@@ -736,6 +736,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
     const schema = Joi.object({
       productId: Joi.number().integer().required(),
       stockQuantity: Joi.number().integer().min(0).required(),
+      sourceType: Joi.string().valid('warehouse', 'direct').default('warehouse'),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -775,7 +776,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
       });
     }
 
-    const { productId, stockQuantity } = value;
+    const { productId, stockQuantity, sourceType } = value;
 
     // Get product name for history logging
     const productInfo = await query(
@@ -784,19 +785,66 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
     );
     const productName = productInfo.rows[0]?.product_name || 'Unknown';
 
-    const result = await query(
-      `INSERT INTO machine_products (machine_id, product_id, current_stock)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
-      [machineId, productId, stockQuantity]
-    );
+    const vendorId = req.user.id;
+
+    // Use transaction for warehouse deduction
+    const result = await transaction(async (client) => {
+      // If sourcing from warehouse and adding stock, deduct from central inventory
+      if (sourceType === 'warehouse' && stockQuantity > 0) {
+        const centralRow = await client.query(
+          `SELECT id, quantity_on_hand FROM vendor_inventory
+           WHERE vendor_id = $1 AND product_id = $2 FOR UPDATE`,
+          [vendorId, productId]
+        );
+
+        // Grace condition: if no vendor_inventory row exists, proceed without deduction
+        if (centralRow.rows.length > 0) {
+          const centralStock = centralRow.rows[0].quantity_on_hand;
+          if (centralStock < stockQuantity) {
+            throw new Error(`Insufficient warehouse stock. Available: ${centralStock}, requested: ${stockQuantity}`);
+          }
+
+          await client.query(
+            `UPDATE vendor_inventory
+             SET quantity_on_hand = quantity_on_hand - $1, updated_at = CURRENT_TIMESTAMP
+             WHERE vendor_id = $2 AND product_id = $3`,
+            [stockQuantity, vendorId, productId]
+          );
+
+          await client.query(
+            `INSERT INTO inventory_transactions
+             (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+             VALUES ($1, $2, 'dispersal_to_machine', $3, $4, $5, $6, $7)`,
+            [vendorId, productId, -stockQuantity, centralStock, centralStock - stockQuantity, machineId, `Added to machine with ${stockQuantity} units`]
+          );
+        }
+      } else if (sourceType === 'direct' && stockQuantity > 0) {
+        // Log direct-to-machine transaction for audit (no deduction)
+        await client.query(
+          `INSERT INTO inventory_transactions
+           (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+           VALUES ($1, $2, 'direct_to_machine', $3, 0, 0, $4, $5)`,
+          [vendorId, productId, stockQuantity, machineId, 'Direct purchase to machine']
+        );
+      }
+
+      const insertResult = await client.query(
+        `INSERT INTO machine_products (machine_id, product_id, current_stock)
+         VALUES ($1, $2, $3)
+         RETURNING *`,
+        [machineId, productId, stockQuantity]
+      );
+
+      return insertResult.rows[0];
+    });
 
     // Log to machine_history for visit memory
     await logMachineHistory(machineId, req.user.id, 'product_added', {
       product_id: productId,
       product_name: productName,
       initial_stock: stockQuantity,
-      inventory_id: result.rows[0].id
+      source_type: sourceType,
+      inventory_id: result.id
     });
 
     // Update last visit timestamp
@@ -805,7 +853,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
     res.status(201).json({
       success: true,
       message: 'Product added to machine inventory',
-      data: { inventoryItem: result.rows[0] },
+      data: { inventoryItem: result },
     });
   } catch (error) {
     logger.error('Error adding to inventory', { error: error.message });
@@ -813,6 +861,12 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
       return res.status(409).json({
         success: false,
         message: 'Product already exists in this machine',
+      });
+    }
+    if (error.message && error.message.includes('Insufficient warehouse')) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
       });
     }
     res.status(500).json({
@@ -831,6 +885,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     const { machineId, id } = req.params;
     const schema = Joi.object({
       stockQuantity: Joi.number().integer().min(0).optional(),
+      sourceType: Joi.string().valid('warehouse', 'direct').default('warehouse'),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -844,41 +899,98 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     // Verify machine belongs to vendor
     if (!await verifyMachineOwnership(machineId, req.user.id, res)) return;
 
-    // Build update query
-    const updates = [];
-    const values = [];
-    let paramCount = 1;
-
-    if (value.stockQuantity !== undefined) {
-      updates.push(`current_stock = $${paramCount++}`);
-      values.push(value.stockQuantity);
-    }
-
-    if (updates.length === 0) {
+    if (value.stockQuantity === undefined) {
       return res.status(400).json({
         success: false,
         message: 'No fields to update',
       });
     }
 
-    values.push(id, machineId);
-    const updateQuery = `UPDATE machine_products SET ${updates.join(', ')} WHERE id = $${paramCount} AND machine_id = $${paramCount + 1} RETURNING *`;
+    const vendorId = req.user.id;
+    const { stockQuantity, sourceType } = value;
 
-    const result = await query(updateQuery, values);
+    const result = await transaction(async (client) => {
+      // Get current stock level and product_id
+      const current = await client.query(
+        `SELECT id, current_stock, product_id FROM machine_products
+         WHERE id = $1 AND machine_id = $2 FOR UPDATE`,
+        [id, machineId]
+      );
 
-    if (result.rows.length === 0) {
+      if (current.rows.length === 0) {
+        throw new Error('NOT_FOUND');
+      }
+
+      const currentStock = current.rows[0].current_stock;
+      const productId = current.rows[0].product_id;
+      const delta = stockQuantity - currentStock;
+
+      // If stock is increasing, handle warehouse deduction
+      if (delta > 0) {
+        if (sourceType === 'warehouse') {
+          const centralRow = await client.query(
+            `SELECT id, quantity_on_hand FROM vendor_inventory
+             WHERE vendor_id = $1 AND product_id = $2 FOR UPDATE`,
+            [vendorId, productId]
+          );
+
+          // Grace condition: if no vendor_inventory row exists, proceed without deduction
+          if (centralRow.rows.length > 0) {
+            const centralStock = centralRow.rows[0].quantity_on_hand;
+            if (centralStock < delta) {
+              throw new Error(`Insufficient warehouse stock. Available: ${centralStock}, requested: ${delta}`);
+            }
+
+            await client.query(
+              `UPDATE vendor_inventory
+               SET quantity_on_hand = quantity_on_hand - $1, updated_at = CURRENT_TIMESTAMP
+               WHERE vendor_id = $2 AND product_id = $3`,
+              [delta, vendorId, productId]
+            );
+
+            await client.query(
+              `INSERT INTO inventory_transactions
+               (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+               VALUES ($1, $2, 'dispersal_to_machine', $3, $4, $5, $6, $7)`,
+              [vendorId, productId, -delta, centralStock, centralStock - delta, machineId, `Restocked machine: ${currentStock} -> ${stockQuantity}`]
+            );
+          }
+        } else if (sourceType === 'direct') {
+          await client.query(
+            `INSERT INTO inventory_transactions
+             (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+             VALUES ($1, $2, 'direct_to_machine', $3, 0, 0, $4, $5)`,
+            [vendorId, productId, delta, machineId, `Direct restock: ${currentStock} -> ${stockQuantity}`]
+          );
+        }
+      }
+
+      const updateResult = await client.query(
+        `UPDATE machine_products SET current_stock = $1 WHERE id = $2 AND machine_id = $3 RETURNING *`,
+        [stockQuantity, id, machineId]
+      );
+
+      return updateResult.rows[0];
+    });
+
+    res.json({
+      success: true,
+      message: 'Inventory updated successfully',
+      data: { inventoryItem: result },
+    });
+  } catch (error) {
+    if (error.message === 'NOT_FOUND') {
       return res.status(404).json({
         success: false,
         message: 'Inventory item not found',
       });
     }
-
-    res.json({
-      success: true,
-      message: 'Inventory updated successfully',
-      data: { inventoryItem: result.rows[0] },
-    });
-  } catch (error) {
+    if (error.message && error.message.includes('Insufficient warehouse')) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
     logger.error('Error updating inventory', { error: error.message });
     res.status(500).json({
       success: false,
@@ -2637,6 +2749,377 @@ router.put('/machines/:machineId/inventory/:id/expiration', async (req, res) => 
     res.status(500).json({
       success: false,
       message: 'Error updating expiration date',
+    });
+  }
+});
+
+// ========================================
+// CENTRAL INVENTORY ROUTES
+// ========================================
+
+/**
+ * GET /api/vendor/inventory
+ * List all central inventory with low-stock flags and summary
+ */
+router.get('/inventory', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const result = await query(
+      `SELECT vi.id, vi.product_id, vi.quantity_on_hand, vi.reorder_threshold,
+              vi.created_at, vi.updated_at,
+              p.product_name, p.category, p.image_url, p.price,
+              CASE
+                WHEN vi.quantity_on_hand = 0 THEN 'out'
+                WHEN vi.quantity_on_hand <= vi.reorder_threshold THEN 'low'
+                ELSE 'ok'
+              END as stock_status
+       FROM vendor_inventory vi
+       JOIN products p ON vi.product_id = p.id
+       WHERE vi.vendor_id = $1
+         AND (p.is_deleted = false OR p.is_deleted IS NULL)
+       ORDER BY
+         CASE
+           WHEN vi.quantity_on_hand = 0 THEN 0
+           WHEN vi.quantity_on_hand <= vi.reorder_threshold THEN 1
+           ELSE 2
+         END,
+         p.product_name`,
+      [vendorId]
+    );
+
+    const summary = {
+      totalProducts: result.rows.length,
+      outOfStock: result.rows.filter(r => r.stock_status === 'out').length,
+      lowStock: result.rows.filter(r => r.stock_status === 'low').length,
+      healthy: result.rows.filter(r => r.stock_status === 'ok').length,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        inventory: result.rows,
+        summary,
+      },
+    });
+  } catch (error) {
+    logger.error('Error fetching central inventory', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching central inventory',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/inventory/purchase
+ * Log a bulk purchase (upserts vendor_inventory, creates transaction)
+ */
+router.post('/inventory/purchase', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      productId: Joi.number().integer().required(),
+      quantity: Joi.number().integer().min(1).required(),
+      notes: Joi.string().max(500).allow('', null).optional(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const vendorId = req.user.id;
+    const { productId, quantity, notes } = value;
+
+    // Verify product belongs to vendor
+    const productCheck = await query(
+      'SELECT id, product_name FROM products WHERE id = $1 AND vendor_id = $2',
+      [productId, vendorId]
+    );
+    if (productCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    const result = await transaction(async (client) => {
+      // Upsert vendor_inventory
+      const existing = await client.query(
+        `SELECT id, quantity_on_hand FROM vendor_inventory
+         WHERE vendor_id = $1 AND product_id = $2 FOR UPDATE`,
+        [vendorId, productId]
+      );
+
+      let quantityBefore = 0;
+      let inventoryRow;
+
+      if (existing.rows.length === 0) {
+        inventoryRow = await client.query(
+          `INSERT INTO vendor_inventory (vendor_id, product_id, quantity_on_hand)
+           VALUES ($1, $2, $3)
+           RETURNING *`,
+          [vendorId, productId, quantity]
+        );
+        quantityBefore = 0;
+      } else {
+        quantityBefore = existing.rows[0].quantity_on_hand;
+        inventoryRow = await client.query(
+          `UPDATE vendor_inventory
+           SET quantity_on_hand = quantity_on_hand + $1, updated_at = CURRENT_TIMESTAMP
+           WHERE vendor_id = $2 AND product_id = $3
+           RETURNING *`,
+          [quantity, vendorId, productId]
+        );
+      }
+
+      // Log transaction
+      await client.query(
+        `INSERT INTO inventory_transactions
+         (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, notes)
+         VALUES ($1, $2, 'purchase', $3, $4, $5, $6)`,
+        [vendorId, productId, quantity, quantityBefore, quantityBefore + quantity, notes || null]
+      );
+
+      return inventoryRow.rows[0];
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Purchased ${quantity} units of ${productCheck.rows[0].product_name}`,
+      data: { inventory: result },
+    });
+  } catch (error) {
+    logger.error('Error logging purchase', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error logging purchase',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/inventory/adjust
+ * Manual adjustment with required reason
+ */
+router.post('/inventory/adjust', async (req, res) => {
+  try {
+    const schema = Joi.object({
+      productId: Joi.number().integer().required(),
+      quantity: Joi.number().integer().required(), // positive or negative
+      notes: Joi.string().min(1).max(500).required(), // reason required
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const vendorId = req.user.id;
+    const { productId, quantity, notes } = value;
+
+    const result = await transaction(async (client) => {
+      const existing = await client.query(
+        `SELECT id, quantity_on_hand FROM vendor_inventory
+         WHERE vendor_id = $1 AND product_id = $2 FOR UPDATE`,
+        [vendorId, productId]
+      );
+
+      if (existing.rows.length === 0) {
+        throw new Error('Product not found in central inventory. Log a purchase first.');
+      }
+
+      const quantityBefore = existing.rows[0].quantity_on_hand;
+      const quantityAfter = quantityBefore + quantity;
+
+      if (quantityAfter < 0) {
+        throw new Error(`Adjustment would result in negative stock (${quantityBefore} + ${quantity} = ${quantityAfter})`);
+      }
+
+      const inventoryRow = await client.query(
+        `UPDATE vendor_inventory
+         SET quantity_on_hand = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE vendor_id = $2 AND product_id = $3
+         RETURNING *`,
+        [quantityAfter, vendorId, productId]
+      );
+
+      await client.query(
+        `INSERT INTO inventory_transactions
+         (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, notes)
+         VALUES ($1, $2, 'adjustment', $3, $4, $5, $6)`,
+        [vendorId, productId, quantity, quantityBefore, quantityAfter, notes]
+      );
+
+      return inventoryRow.rows[0];
+    });
+
+    res.json({
+      success: true,
+      message: `Inventory adjusted by ${quantity > 0 ? '+' : ''}${quantity}`,
+      data: { inventory: result },
+    });
+  } catch (error) {
+    logger.error('Error adjusting inventory', { error: error.message });
+    const status = error.message.includes('not found') || error.message.includes('negative') ? 400 : 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Error adjusting inventory',
+    });
+  }
+});
+
+/**
+ * PUT /api/vendor/inventory/:productId/threshold
+ * Update reorder threshold for a product
+ */
+router.put('/inventory/:productId/threshold', async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const schema = Joi.object({
+      threshold: Joi.number().integer().min(0).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const result = await query(
+      `UPDATE vendor_inventory
+       SET reorder_threshold = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE vendor_id = $2 AND product_id = $3
+       RETURNING *`,
+      [value.threshold, req.user.id, productId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found in central inventory',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Reorder threshold updated',
+      data: { inventory: result.rows[0] },
+    });
+  } catch (error) {
+    logger.error('Error updating threshold', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error updating threshold',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/inventory/transactions
+ * Paginated transaction history with filters
+ */
+router.get('/inventory/transactions', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+    const { productId, type, machineId, limit = 50, offset = 0 } = req.query;
+
+    let whereClause = 'WHERE it.vendor_id = $1';
+    const params = [vendorId];
+
+    if (productId) {
+      params.push(productId);
+      whereClause += ` AND it.product_id = $${params.length}`;
+    }
+    if (type) {
+      params.push(type);
+      whereClause += ` AND it.transaction_type = $${params.length}`;
+    }
+    if (machineId) {
+      params.push(machineId);
+      whereClause += ` AND it.machine_id = $${params.length}`;
+    }
+
+    const countResult = await query(
+      `SELECT COUNT(*) as total FROM inventory_transactions it ${whereClause}`,
+      params
+    );
+
+    params.push(parseInt(limit), parseInt(offset));
+    const result = await query(
+      `SELECT it.id, it.product_id, it.transaction_type, it.quantity,
+              it.quantity_before, it.quantity_after, it.machine_id,
+              it.notes, it.created_at,
+              p.product_name, p.category,
+              vm.machine_name
+       FROM inventory_transactions it
+       JOIN products p ON it.product_id = p.id
+       LEFT JOIN vending_machines vm ON it.machine_id = vm.id
+       ${whereClause}
+       ORDER BY it.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+
+    res.json({
+      success: true,
+      data: {
+        transactions: result.rows,
+        total: parseInt(countResult.rows[0].total),
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+      },
+    });
+  } catch (error) {
+    logger.error('Error fetching inventory transactions', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching inventory transactions',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/inventory/alerts
+ * Low-stock items only (for nav badge count)
+ */
+router.get('/inventory/alerts', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const result = await query(
+      `SELECT vi.id, vi.product_id, vi.quantity_on_hand, vi.reorder_threshold,
+              p.product_name, p.category,
+              CASE
+                WHEN vi.quantity_on_hand = 0 THEN 'out'
+                ELSE 'low'
+              END as alert_type
+       FROM vendor_inventory vi
+       JOIN products p ON vi.product_id = p.id
+       WHERE vi.vendor_id = $1
+         AND vi.quantity_on_hand <= vi.reorder_threshold
+         AND (p.is_deleted = false OR p.is_deleted IS NULL)
+       ORDER BY vi.quantity_on_hand ASC, p.product_name`,
+      [vendorId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        alerts: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    logger.error('Error fetching inventory alerts', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching inventory alerts',
     });
   }
 });
