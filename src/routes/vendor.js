@@ -801,7 +801,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
         if (centralRow.rows.length > 0) {
           const centralStock = centralRow.rows[0].quantity_on_hand;
           if (centralStock < stockQuantity) {
-            throw new Error(`Insufficient warehouse stock. Available: ${centralStock}, requested: ${stockQuantity}`);
+            throw new Error(`Insufficient stock on hand. Available: ${centralStock}, requested: ${stockQuantity}`);
           }
 
           await client.query(
@@ -863,7 +863,7 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
         message: 'Product already exists in this machine',
       });
     }
-    if (error.message && error.message.includes('Insufficient warehouse')) {
+    if (error.message && error.message.includes('Insufficient stock on hand')) {
       return res.status(400).json({
         success: false,
         message: error.message,
@@ -938,7 +938,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
           if (centralRow.rows.length > 0) {
             const centralStock = centralRow.rows[0].quantity_on_hand;
             if (centralStock < delta) {
-              throw new Error(`Insufficient warehouse stock. Available: ${centralStock}, requested: ${delta}`);
+              throw new Error(`Insufficient stock on hand. Available: ${centralStock}, requested: ${delta}`);
             }
 
             await client.query(
@@ -994,7 +994,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
         message: 'Inventory item not found',
       });
     }
-    if (error.message && error.message.includes('Insufficient warehouse')) {
+    if (error.message && error.message.includes('Insufficient stock on hand')) {
       return res.status(400).json({
         success: false,
         message: error.message,
