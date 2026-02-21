@@ -963,6 +963,15 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
             [vendorId, productId, delta, machineId, `Direct restock: ${currentStock} -> ${stockQuantity}`]
           );
         }
+      } else if (delta < 0) {
+        // Stock decreased — record as sold/consumed from machine
+        const sold = Math.abs(delta);
+        await client.query(
+          `INSERT INTO inventory_transactions
+           (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+           VALUES ($1, $2, 'sold_from_machine', $3, $4, $5, $6, $7)`,
+          [vendorId, productId, -sold, currentStock, stockQuantity, machineId, `Sold/consumed: ${currentStock} -> ${stockQuantity} (${sold} units)`]
+        );
       }
 
       const updateResult = await client.query(
@@ -2769,6 +2778,8 @@ router.get('/inventory', async (req, res) => {
       `SELECT vi.id, vi.product_id, vi.quantity_on_hand, vi.reorder_threshold,
               vi.created_at, vi.updated_at,
               p.product_name, p.category, p.image_url, p.price,
+              COALESCE(field.in_field, 0)::int as in_field,
+              (vi.quantity_on_hand + COALESCE(field.in_field, 0))::int as total_stock,
               CASE
                 WHEN vi.quantity_on_hand = 0 THEN 'out'
                 WHEN vi.quantity_on_hand <= vi.reorder_threshold THEN 'low'
@@ -2776,6 +2787,15 @@ router.get('/inventory', async (req, res) => {
               END as stock_status
        FROM vendor_inventory vi
        JOIN products p ON vi.product_id = p.id
+       LEFT JOIN (
+         SELECT mp.product_id, SUM(mp.current_stock) as in_field
+         FROM machine_products mp
+         JOIN vending_machines vm ON mp.machine_id = vm.id
+         WHERE vm.vendor_id = $1
+           AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+           AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
+         GROUP BY mp.product_id
+       ) field ON vi.product_id = field.product_id
        WHERE vi.vendor_id = $1
          AND (p.is_deleted = false OR p.is_deleted IS NULL)
        ORDER BY
@@ -2788,11 +2808,17 @@ router.get('/inventory', async (req, res) => {
       [vendorId]
     );
 
+    const totalInField = result.rows.reduce((sum, r) => sum + r.in_field, 0);
+    const totalOnHand = result.rows.reduce((sum, r) => sum + r.quantity_on_hand, 0);
+
     const summary = {
       totalProducts: result.rows.length,
       outOfStock: result.rows.filter(r => r.stock_status === 'out').length,
       lowStock: result.rows.filter(r => r.stock_status === 'low').length,
       healthy: result.rows.filter(r => r.stock_status === 'ok').length,
+      totalOnHand: totalOnHand,
+      totalInField: totalInField,
+      totalAll: totalOnHand + totalInField,
     };
 
     res.json({
