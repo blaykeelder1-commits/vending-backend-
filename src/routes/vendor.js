@@ -756,10 +756,10 @@ router.post('/machines/:machineId/inventory', async (req, res) => {
       [machineId]
     );
 
-    if (parseInt(countCheck.rows[0].count) >= 40) {
+    if (parseInt(countCheck.rows[0].count) >= 60) {
       return res.status(400).json({
         success: false,
-        message: 'Machine inventory limit reached (40 products max)',
+        message: 'Machine inventory limit reached (60 products max)',
       });
     }
 
@@ -1166,12 +1166,12 @@ router.post('/machines/:machineId/performance-commit', async (req, res) => {
           [mark.inventoryId, mark.isPerforming, req.user.id]
         );
 
-        // Update performance_marked_at, then reset is_performing to NULL
+        // Update is_performing with the committed value and timestamp
         await client.query(
           `UPDATE machine_products
-           SET is_performing = NULL, performance_marked_at = CURRENT_TIMESTAMP
+           SET is_performing = $2, performance_marked_at = CURRENT_TIMESTAMP
            WHERE id = $1`,
-          [mark.inventoryId]
+          [mark.inventoryId, mark.isPerforming]
         );
       }
 
@@ -2168,8 +2168,8 @@ router.post('/redistribution', async (req, res) => {
           [targetMachineId]
         );
 
-        if (parseInt(countCheck.rows[0].count) >= 40) {
-          throw new Error('Target machine has reached maximum product limit (40)');
+        if (parseInt(countCheck.rows[0].count) >= 60) {
+          throw new Error('Target machine has reached maximum product limit (60)');
         }
 
         // Create new inventory entry
@@ -2242,6 +2242,353 @@ router.post('/redistribution', async (req, res) => {
     res.status(error.message.includes('not found') || error.message.includes('Insufficient') ? 400 : 500).json({
       success: false,
       message: error.message || 'Error executing redistribution',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/redistribution/batch
+ * Execute multiple product redistributions atomically
+ */
+router.post('/redistribution/batch', async (req, res) => {
+  try {
+    const moveSchema = Joi.object({
+      sourceMachineId: Joi.number().integer().required(),
+      targetMachineId: Joi.number().integer().required(),
+      productId: Joi.number().integer().required(),
+      quantity: Joi.number().integer().min(1).required(),
+    });
+
+    const schema = Joi.object({
+      moves: Joi.array().items(moveSchema).min(1).max(50).required(),
+      reason: Joi.string().max(500).optional(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { moves, reason } = value;
+
+    // Validate no move has same source and target
+    for (let i = 0; i < moves.length; i++) {
+      if (moves[i].sourceMachineId === moves[i].targetMachineId) {
+        return res.status(400).json({
+          success: false,
+          message: `Move ${i + 1}: Source and target machines must be different`,
+        });
+      }
+    }
+
+    const result = await transaction(async (client) => {
+      // Bulk-verify all unique machines belong to vendor
+      const allMachineIds = [...new Set(moves.flatMap(m => [m.sourceMachineId, m.targetMachineId]))];
+      const machinesCheck = await client.query(
+        `SELECT id, machine_name FROM vending_machines
+         WHERE id = ANY($1) AND vendor_id = $2`,
+        [allMachineIds, req.user.id]
+      );
+      if (machinesCheck.rows.length !== allMachineIds.length) {
+        throw new Error('One or more machines not found or not owned by vendor');
+      }
+      const machineNames = Object.fromEntries(machinesCheck.rows.map(r => [r.id, r.machine_name]));
+
+      // Bulk-verify all unique products belong to vendor
+      const allProductIds = [...new Set(moves.map(m => m.productId))];
+      const productsCheck = await client.query(
+        'SELECT id, product_name FROM products WHERE id = ANY($1) AND vendor_id = $2',
+        [allProductIds, req.user.id]
+      );
+      if (productsCheck.rows.length !== allProductIds.length) {
+        throw new Error('One or more products not found or not owned by vendor');
+      }
+      const productNames = Object.fromEntries(productsCheck.rows.map(r => [r.id, r.product_name]));
+
+      const moveResults = [];
+      let totalUnitsTransferred = 0;
+
+      for (let i = 0; i < moves.length; i++) {
+        const move = moves[i];
+
+        // Get source inventory with lock — reads committed writes from prior moves in this txn
+        const sourceInventory = await client.query(
+          `SELECT id, current_stock FROM machine_products
+           WHERE machine_id = $1 AND product_id = $2 FOR UPDATE`,
+          [move.sourceMachineId, move.productId]
+        );
+
+        if (sourceInventory.rows.length === 0) {
+          throw new Error(`Move ${i + 1}: Product "${productNames[move.productId]}" not found in source machine "${machineNames[move.sourceMachineId]}"`);
+        }
+
+        const sourceStock = sourceInventory.rows[0].current_stock;
+
+        if (sourceStock < move.quantity) {
+          throw new Error(`Move ${i + 1}: Insufficient stock for "${productNames[move.productId]}" in "${machineNames[move.sourceMachineId]}". Available: ${sourceStock}, requested: ${move.quantity}`);
+        }
+
+        // Get or create target inventory
+        let targetInventory = await client.query(
+          `SELECT id, current_stock FROM machine_products
+           WHERE machine_id = $1 AND product_id = $2 FOR UPDATE`,
+          [move.targetMachineId, move.productId]
+        );
+
+        let targetStockBefore;
+        let targetInventoryId;
+
+        if (targetInventory.rows.length === 0) {
+          const countCheck = await client.query(
+            'SELECT COUNT(*) as count FROM machine_products WHERE machine_id = $1',
+            [move.targetMachineId]
+          );
+
+          if (parseInt(countCheck.rows[0].count) >= 60) {
+            throw new Error(`Move ${i + 1}: Target machine "${machineNames[move.targetMachineId]}" has reached maximum product limit (60)`);
+          }
+
+          const newEntry = await client.query(
+            `INSERT INTO machine_products (machine_id, product_id, current_stock)
+             VALUES ($1, $2, 0) RETURNING id, current_stock`,
+            [move.targetMachineId, move.productId]
+          );
+          targetInventoryId = newEntry.rows[0].id;
+          targetStockBefore = 0;
+        } else {
+          targetInventoryId = targetInventory.rows[0].id;
+          targetStockBefore = targetInventory.rows[0].current_stock;
+        }
+
+        const newSourceStock = sourceStock - move.quantity;
+
+        // Update source stock
+        if (newSourceStock === 0) {
+          await client.query(
+            'DELETE FROM machine_products WHERE id = $1',
+            [sourceInventory.rows[0].id]
+          );
+        } else {
+          await client.query(
+            'UPDATE machine_products SET current_stock = $1 WHERE id = $2',
+            [newSourceStock, sourceInventory.rows[0].id]
+          );
+        }
+
+        // Update target stock
+        const newTargetStock = targetStockBefore + move.quantity;
+        await client.query(
+          'UPDATE machine_products SET current_stock = $1 WHERE id = $2',
+          [newTargetStock, targetInventoryId]
+        );
+
+        // Record in audit log
+        await client.query(
+          `INSERT INTO product_redistributions
+           (source_machine_id, target_machine_id, product_id, quantity_transferred,
+            reason, performed_by, source_stock_before, source_stock_after,
+            target_stock_before, target_stock_after)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [
+            move.sourceMachineId, move.targetMachineId, move.productId, move.quantity,
+            reason || null, req.user.id,
+            sourceStock, newSourceStock,
+            targetStockBefore, newTargetStock
+          ]
+        );
+
+        totalUnitsTransferred += move.quantity;
+        moveResults.push({
+          productName: productNames[move.productId],
+          quantity: move.quantity,
+          sourceMachine: machineNames[move.sourceMachineId],
+          targetMachine: machineNames[move.targetMachineId],
+          sourceStockBefore: sourceStock,
+          sourceStockAfter: newSourceStock,
+          targetStockBefore,
+          targetStockAfter: newTargetStock,
+        });
+      }
+
+      return { totalMoves: moves.length, totalUnitsTransferred, moves: moveResults };
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully completed ${result.totalMoves} transfers (${result.totalUnitsTransferred} total units)`,
+      data: result,
+    });
+  } catch (error) {
+    logger.error('Error executing batch redistribution', { error: error.message });
+    res.status(error.message.includes('not found') || error.message.includes('Insufficient') || error.message.includes('Move ') ? 400 : 500).json({
+      success: false,
+      message: error.message || 'Error executing batch redistribution',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:machineId/auto-distribute
+ * Suggest redistribution moves for non-performing products based on performance data
+ */
+router.get('/machines/:machineId/auto-distribute', async (req, res) => {
+  try {
+    const machineId = parseInt(req.params.machineId);
+
+    // Verify machine ownership
+    const machineCheck = await query(
+      'SELECT id, machine_name FROM vending_machines WHERE id = $1 AND vendor_id = $2',
+      [machineId, req.user.id]
+    );
+    if (machineCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Machine not found' });
+    }
+
+    // Get non-performing products in this machine
+    const nonPerforming = await query(
+      `SELECT mp.product_id, p.product_name, mp.current_stock
+       FROM machine_products mp
+       JOIN products p ON mp.product_id = p.id
+       WHERE mp.machine_id = $1 AND mp.is_performing = false AND mp.current_stock > 0
+       ORDER BY p.product_name`,
+      [machineId]
+    );
+
+    if (nonPerforming.rows.length === 0) {
+      return res.json({
+        success: true,
+        data: { moves: [], summary: { totalProducts: 0, totalUnits: 0, skipped: [] } },
+      });
+    }
+
+    // Get all other active machines for this vendor
+    const otherMachines = await query(
+      'SELECT id, machine_name FROM vending_machines WHERE vendor_id = $1 AND id != $2 AND is_active = true ORDER BY machine_name',
+      [req.user.id, machineId]
+    );
+
+    // For each non-performing product, find where it performs well across other machines
+    // Use performance log history + current is_performing flag
+    const productIds = nonPerforming.rows.map(r => r.product_id);
+    const performanceData = await query(
+      `SELECT mp.machine_id, mp.product_id, mp.current_stock, mp.is_performing,
+              vm.machine_name,
+              (SELECT COUNT(*) FROM product_performance_log ppl
+               JOIN machine_products mp2 ON ppl.machine_product_id = mp2.id
+               WHERE mp2.machine_id = mp.machine_id AND mp2.product_id = mp.product_id
+               AND ppl.is_performing = true) as positive_marks,
+              (SELECT COUNT(*) FROM product_performance_log ppl
+               JOIN machine_products mp2 ON ppl.machine_product_id = mp2.id
+               WHERE mp2.machine_id = mp.machine_id AND mp2.product_id = mp.product_id
+               AND ppl.is_performing = false) as negative_marks
+       FROM machine_products mp
+       JOIN vending_machines vm ON mp.machine_id = vm.id
+       WHERE mp.product_id = ANY($1) AND vm.vendor_id = $2 AND mp.machine_id != $3
+         AND vm.is_active = true
+       ORDER BY mp.product_id, positive_marks DESC`,
+      [productIds, req.user.id, machineId]
+    );
+
+    // Build a map: productId → [{ machineId, machineName, positiveMarks, negativeMarks, isPerforming, currentStock }]
+    const perfMap = {};
+    performanceData.rows.forEach(r => {
+      if (!perfMap[r.product_id]) perfMap[r.product_id] = [];
+      perfMap[r.product_id].push({
+        machineId: r.machine_id,
+        machineName: r.machine_name,
+        currentStock: r.current_stock,
+        isPerforming: r.is_performing,
+        positiveMarks: parseInt(r.positive_marks),
+        negativeMarks: parseInt(r.negative_marks),
+      });
+    });
+
+    const moves = [];
+    const skipped = [];
+
+    for (const product of nonPerforming.rows) {
+      const targets = perfMap[product.product_id] || [];
+
+      // Filter to machines where product is currently performing OR has more positive than negative marks
+      const goodTargets = targets.filter(t =>
+        t.isPerforming === true || (t.positiveMarks > t.negativeMarks && t.positiveMarks > 0)
+      );
+
+      // Also include machines that don't have this product yet (potential new placement)
+      // but only if there are no performing targets at all
+      const otherMachineIds = otherMachines.rows.map(m => m.id);
+      const machinesWithProduct = targets.map(t => t.machineId);
+      const machinesWithout = otherMachines.rows.filter(m => !machinesWithProduct.includes(m.id));
+
+      let finalTargets = goodTargets.length > 0 ? goodTargets : [];
+
+      if (finalTargets.length === 0) {
+        // No performing targets — skip this product
+        skipped.push({
+          productId: product.product_id,
+          productName: product.product_name.trim(),
+          stock: product.current_stock,
+          reason: 'Not performing well in any machine',
+        });
+        continue;
+      }
+
+      // Sort targets: currently performing first, then by positive marks desc, then lowest stock first
+      finalTargets.sort((a, b) => {
+        if (a.isPerforming && !b.isPerforming) return -1;
+        if (!a.isPerforming && b.isPerforming) return 1;
+        if (b.positiveMarks !== a.positiveMarks) return b.positiveMarks - a.positiveMarks;
+        return a.currentStock - b.currentStock;
+      });
+
+      // Distribute evenly across targets
+      let remaining = product.current_stock;
+      const numTargets = finalTargets.length;
+      const baseAmount = Math.floor(remaining / numTargets);
+      let extra = remaining % numTargets;
+
+      for (const target of finalTargets) {
+        if (remaining <= 0) break;
+        const qty = baseAmount + (extra > 0 ? 1 : 0);
+        if (extra > 0) extra--;
+        if (qty > 0) {
+          moves.push({
+            sourceMachineId: machineId,
+            targetMachineId: target.machineId,
+            productId: product.product_id,
+            productName: product.product_name.trim(),
+            quantity: qty,
+            targetMachineName: target.machineName.trim(),
+            targetCurrentStock: target.currentStock,
+            targetIsPerforming: target.isPerforming,
+            targetPositiveMarks: target.positiveMarks,
+          });
+          remaining -= qty;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        sourceMachine: machineCheck.rows[0].machine_name.trim(),
+        moves,
+        summary: {
+          totalProducts: nonPerforming.rows.length - skipped.length,
+          totalUnits: moves.reduce((sum, m) => sum + m.quantity, 0),
+          totalMoves: moves.length,
+          skipped,
+        },
+      },
+    });
+  } catch (error) {
+    logger.error('Error generating auto-distribute suggestions', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error generating auto-distribute suggestions',
     });
   }
 });
