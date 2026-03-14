@@ -3441,7 +3441,11 @@ router.get('/inventory', async (req, res) => {
                 WHEN vi.quantity_on_hand = 0 THEN 'out'
                 WHEN vi.quantity_on_hand <= vi.reorder_threshold THEN 'low'
                 ELSE 'ok'
-              END as stock_status
+              END as stock_status,
+              COALESCE(sales.sold_30d, 0)::int as sold_30d,
+              COALESCE(sales.sold_7d, 0)::int as sold_7d,
+              COALESCE(perf.machines_performing, 0)::int as machines_performing,
+              COALESCE(perf.machines_total, 0)::int as machines_stocked
        FROM vendor_inventory vi
        JOIN products p ON vi.product_id = p.id
        LEFT JOIN (
@@ -3453,6 +3457,25 @@ router.get('/inventory', async (req, res) => {
            AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
          GROUP BY mp.product_id
        ) field ON vi.product_id = field.product_id
+       LEFT JOIN (
+         SELECT product_id,
+                SUM(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN ABS(quantity) ELSE 0 END) as sold_30d,
+                SUM(CASE WHEN created_at >= NOW() - INTERVAL '7 days' THEN ABS(quantity) ELSE 0 END) as sold_7d
+         FROM inventory_transactions
+         WHERE vendor_id = $1 AND transaction_type = 'sold_from_machine'
+         GROUP BY product_id
+       ) sales ON vi.product_id = sales.product_id
+       LEFT JOIN (
+         SELECT mp.product_id,
+                COUNT(*) as machines_total,
+                COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as machines_performing
+         FROM machine_products mp
+         JOIN vending_machines vm ON mp.machine_id = vm.id
+         WHERE vm.vendor_id = $1
+           AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+           AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
+         GROUP BY mp.product_id
+       ) perf ON vi.product_id = perf.product_id
        WHERE vi.vendor_id = $1
          AND (p.is_deleted = false OR p.is_deleted IS NULL)
        ORDER BY
@@ -3464,6 +3487,18 @@ router.get('/inventory', async (req, res) => {
          p.product_name`,
       [vendorId]
     );
+
+    // Calculate suggested reorder for each product
+    result.rows.forEach(item => {
+      const dailyRate = item.sold_30d > 0 ? item.sold_30d / 30 : 0;
+      // Suggest enough to cover ~2 weeks of sales, rounded up to nearest 5
+      const rawSuggestion = Math.ceil(dailyRate * 14);
+      const suggested = rawSuggestion > 0 ? Math.ceil(rawSuggestion / 5) * 5 : 0;
+      // Factor in performance: if performing well across machines, bump suggestion
+      const perfRatio = item.machines_stocked > 0 ? item.machines_performing / item.machines_stocked : 0;
+      const perfMultiplier = perfRatio >= 0.5 ? 1.2 : perfRatio > 0 ? 1.0 : 0.8;
+      item.suggested_reorder = suggested > 0 ? Math.ceil(suggested * perfMultiplier) : item.reorder_threshold;
+    });
 
     const totalInField = result.rows.reduce((sum, r) => sum + r.in_field, 0);
     const totalOnHand = result.rows.reduce((sum, r) => sum + r.quantity_on_hand, 0);
