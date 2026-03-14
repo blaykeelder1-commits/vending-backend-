@@ -26,6 +26,81 @@ if (process.env.SENTRY_DSN) {
 
 const app = express();
 
+// Health check — placed BEFORE all middleware so Render health checks,
+// monitoring tools, and keep-alive pings always get through (no Origin needed).
+app.get('/api/health', async (req, res) => {
+  try {
+    const { pool } = require('./config/database');
+    const { redis } = require('./config/redis');
+
+    const checks = {
+      database: { status: 'unknown' },
+      redis: { status: 'unknown' },
+      timestamp: new Date().toISOString(),
+    };
+
+    let dbFingerprint = null;
+    let machinesCount = 0;
+
+    // Check database
+    try {
+      await pool.query('SELECT 1');
+      checks.database.status = 'ok';
+
+      try {
+        const dbUrlParsed = new URL(process.env.DATABASE_URL || '');
+        const hostParts = dbUrlParsed.hostname.split('.');
+        const maskedHost = hostParts.length > 2
+          ? `${hostParts[0].substring(0, 3)}***.${hostParts[hostParts.length - 2]}.${hostParts[hostParts.length - 1]}`
+          : dbUrlParsed.hostname.substring(0, 10) + '***';
+        const dbName = dbUrlParsed.pathname.substring(1) || 'unknown';
+        const maskedDb = dbName.length > 4 ? dbName.substring(0, 3) + '***' : '***';
+        dbFingerprint = { host: maskedHost, database: maskedDb };
+      } catch (_) { /* URL parsing failed, skip fingerprint */ }
+
+      try {
+        const countResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
+        machinesCount = parseInt(countResult.rows[0].count);
+      } catch (_) { /* table may not exist yet */ }
+    } catch (error) {
+      checks.database.status = 'error';
+      checks.database.message = error.message;
+    }
+
+    // Check Redis if configured
+    if (redis) {
+      try {
+        await redis.ping();
+        checks.redis.status = 'ok';
+      } catch (error) {
+        checks.redis.status = 'error';
+        checks.redis.message = error.message;
+      }
+    } else {
+      checks.redis.status = 'not_configured';
+    }
+
+    const requiredEnvVars = ['FRONTEND_URL', 'JWT_SECRET', 'DATABASE_URL'];
+    const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+    const envStatus = missingEnvVars.length === 0 ? 'ok' : 'missing: ' + missingEnvVars.join(', ');
+
+    const allOk = checks.database.status === 'ok';
+    res.status(allOk ? 200 : 503).json({
+      status: allOk && missingEnvVars.length === 0 ? 'ok' : 'degraded',
+      timestamp: checks.timestamp,
+      uptime: process.uptime(),
+      database: checks.database,
+      database_fingerprint: dbFingerprint,
+      redis: checks.redis,
+      machines_count: machinesCount,
+      environment_variables: envStatus,
+      environment: process.env.NODE_ENV || 'development',
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
 // Request logging with correlation IDs
 app.use(requestLogger);
 
@@ -261,85 +336,6 @@ app.use('/api/analytics', authenticatedLimiter);
 // Customer routes - session-based rate limiting
 app.use('/api/customer', customerLimiter);
 
-// Health check endpoint
-app.get('/api/health', async (req, res) => {
-  const { pool } = require('./config/database');
-  const { redis, cache } = require('./config/redis');
-
-  const checks = {
-    database: { status: 'unknown' },
-    redis: { status: 'unknown' },
-    timestamp: new Date().toISOString(),
-  };
-
-  let dbFingerprint = null;
-  let machinesCount = 0;
-
-  // Check database
-  try {
-    await pool.query('SELECT 1');
-    checks.database.status = 'ok';
-
-    // Get DB fingerprint
-    const dbUrlParsed = new URL(process.env.DATABASE_URL || '');
-    const hostParts = dbUrlParsed.hostname.split('.');
-    const maskedHost = hostParts.length > 2
-      ? `${hostParts[0].substring(0, 3)}***.${hostParts[hostParts.length - 2]}.${hostParts[hostParts.length - 1]}`
-      : dbUrlParsed.hostname.substring(0, 10) + '***';
-
-    const dbName = dbUrlParsed.pathname.substring(1) || 'unknown';
-    const maskedDb = dbName.length > 4
-      ? dbName.substring(0, 3) + '***'
-      : '***';
-    dbFingerprint = {
-      host: maskedHost,
-      database: maskedDb
-    };
-
-    // Get machines count
-    const countResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
-    machinesCount = parseInt(countResult.rows[0].count);
-  } catch (error) {
-    checks.database.status = 'error';
-    checks.database.message = error.message;
-  }
-
-  // Check Redis if configured
-  if (redis) {
-    try {
-      await redis.ping();
-      checks.redis.status = 'ok';
-    } catch (error) {
-      checks.redis.status = 'error';
-      checks.redis.message = error.message;
-    }
-  } else {
-    checks.redis.status = 'not_configured';
-  }
-
-  const requiredEnvVars = [
-    'FRONTEND_URL',
-    'JWT_SECRET',
-    'DATABASE_URL',
-  ];
-
-  const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-  const envStatus = missingEnvVars.length === 0 ? 'ok' : 'missing: ' + missingEnvVars.join(', ');
-
-  const allOk = checks.database.status === 'ok';
-  res.status(allOk ? 200 : 503).json({
-    status: allOk && missingEnvVars.length === 0 ? 'ok' : 'degraded',
-    timestamp: checks.timestamp,
-    uptime: process.uptime(),
-    database: checks.database,
-    database_fingerprint: dbFingerprint,
-    redis: checks.redis,
-    machines_count: machinesCount,
-    environment_variables: envStatus,
-    environment: process.env.NODE_ENV || 'development',
-  });
-});
-
 // Public stats endpoint for social proof
 app.get('/api/stats', async (req, res) => {
   const { pool } = require('./config/database');
@@ -461,6 +457,7 @@ app.get('/api/admin/email-scheduler-stats', verifyAdminToken, async (req, res) =
 // API routes
 const authRouter = require('./routes/auth');
 app.use('/api/auth', authRouter);
+app.use('/api/public', publicLimiter, require('./routes/public'));
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
