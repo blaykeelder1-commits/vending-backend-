@@ -1009,6 +1009,198 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
 });
 
 /**
+ * POST /api/vendor/machines/:machineId/visit-restock
+ * Batch reconcile inventory and restock when visiting a machine
+ */
+router.post('/machines/:machineId/visit-restock', async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const vendorId = req.user.id;
+
+    // Validate request body
+    const schema = Joi.object({
+      items: Joi.array().items(
+        Joi.object({
+          inventoryId: Joi.number().integer().required(),
+          remaining: Joi.number().integer().min(0).required(),
+          restockQuantity: Joi.number().integer().min(0).required(),
+        })
+      ).min(1).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    // Verify machine belongs to vendor
+    if (!await verifyMachineOwnership(machineId, vendorId, res)) return;
+
+    const result = await transaction(async (client) => {
+      const processedItems = [];
+      let totalSold = 0;
+      let totalRestocked = 0;
+      let warehouseDeducted = 0;
+
+      for (const item of value.items) {
+        const { inventoryId, remaining, restockQuantity } = item;
+
+        // Look up machine_products row and verify ownership
+        const mpResult = await client.query(
+          `SELECT mp.id, mp.current_stock, mp.product_id, p.product_name
+           FROM machine_products mp
+           JOIN products p ON mp.product_id = p.id
+           WHERE mp.id = $1 AND mp.machine_id = $2 AND p.vendor_id = $3
+             AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+           FOR UPDATE`,
+          [inventoryId, machineId, vendorId]
+        );
+
+        if (mpResult.rows.length === 0) {
+          throw new Error(`INVALID_ITEM:${inventoryId}`);
+        }
+
+        const { current_stock: currentStock, product_id: productId, product_name: productName } = mpResult.rows[0];
+        let runningStock = currentStock;
+
+        // Step 1: Reconcile sold units
+        const sold = currentStock > remaining ? currentStock - remaining : 0;
+        if (sold > 0) {
+          await client.query(
+            `INSERT INTO inventory_transactions
+             (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+             VALUES ($1, $2, 'sold_from_machine', $3, $4, $5, $6, $7)`,
+            [vendorId, productId, -sold, currentStock, remaining, machineId,
+             `Visit reconciliation: ${currentStock} -> ${remaining} (${sold} sold)`]
+          );
+          totalSold += sold;
+        }
+
+        // Update current_stock to remaining
+        runningStock = remaining;
+        await client.query(
+          `UPDATE machine_products SET current_stock = $1 WHERE id = $2 AND machine_id = $3`,
+          [remaining, inventoryId, machineId]
+        );
+
+        // Step 2: Restock
+        let restockType = null;
+        if (restockQuantity > 0) {
+          // Try to deduct from vendor_inventory
+          const centralRow = await client.query(
+            `SELECT id, quantity_on_hand FROM vendor_inventory
+             WHERE vendor_id = $1 AND product_id = $2 FOR UPDATE`,
+            [vendorId, productId]
+          );
+
+          if (centralRow.rows.length > 0 && centralRow.rows[0].quantity_on_hand >= restockQuantity) {
+            // Deduct from warehouse
+            const centralStock = centralRow.rows[0].quantity_on_hand;
+            await client.query(
+              `UPDATE vendor_inventory
+               SET quantity_on_hand = quantity_on_hand - $1, updated_at = CURRENT_TIMESTAMP
+               WHERE vendor_id = $2 AND product_id = $3`,
+              [restockQuantity, vendorId, productId]
+            );
+
+            await client.query(
+              `INSERT INTO inventory_transactions
+               (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+               VALUES ($1, $2, 'dispersal_to_machine', $3, $4, $5, $6, $7)`,
+              [vendorId, productId, restockQuantity, remaining, remaining + restockQuantity, machineId,
+               `Visit restock: ${remaining} -> ${remaining + restockQuantity}`]
+            );
+
+            restockType = 'dispersal_to_machine';
+            warehouseDeducted += restockQuantity;
+          } else {
+            // No warehouse row or insufficient stock — log as direct_to_machine
+            await client.query(
+              `INSERT INTO inventory_transactions
+               (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+               VALUES ($1, $2, 'direct_to_machine', $3, $4, $5, $6, $7)`,
+              [vendorId, productId, restockQuantity, remaining, remaining + restockQuantity, machineId,
+               `Visit restock (direct): ${remaining} -> ${remaining + restockQuantity}`]
+            );
+
+            restockType = 'direct_to_machine';
+          }
+
+          // Add restock to machine stock
+          await client.query(
+            `UPDATE machine_products SET current_stock = current_stock + $1 WHERE id = $2 AND machine_id = $3`,
+            [restockQuantity, inventoryId, machineId]
+          );
+
+          runningStock = remaining + restockQuantity;
+          totalRestocked += restockQuantity;
+        }
+
+        processedItems.push({
+          inventoryId,
+          productName,
+          previousStock: currentStock,
+          remaining,
+          sold,
+          restocked: restockQuantity,
+          newStock: runningStock,
+          restockType,
+        });
+      }
+
+      return { processedItems, totalSold, totalRestocked, warehouseDeducted };
+    });
+
+    // Log machine_history entry
+    await logMachineHistory(machineId, vendorId, 'visit', {
+      productsReconciled: result.processedItems.length,
+      totalSold: result.totalSold,
+      totalRestocked: result.totalRestocked,
+      warehouseDeducted: result.warehouseDeducted,
+      items: result.processedItems.map(i => ({
+        inventoryId: i.inventoryId,
+        productName: i.productName,
+        sold: i.sold,
+        restocked: i.restocked,
+        newStock: i.newStock,
+      })),
+    });
+
+    // Update last visit timestamp
+    updateLastVisit(machineId);
+
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          productsReconciled: result.processedItems.length,
+          totalSold: result.totalSold,
+          totalRestocked: result.totalRestocked,
+          warehouseDeducted: result.warehouseDeducted,
+        },
+        items: result.processedItems,
+      },
+    });
+  } catch (error) {
+    if (error.message && error.message.startsWith('INVALID_ITEM:')) {
+      const badId = error.message.split(':')[1];
+      return res.status(400).json({
+        success: false,
+        message: `Inventory item ${badId} not found in this machine`,
+      });
+    }
+    logger.error('Error processing visit-restock', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error processing visit restock',
+    });
+  }
+});
+
+/**
  * PUT /api/vendor/machines/:machineId/inventory/:id/performance
  * Set product performance status (Yes/No)
  */
@@ -2701,6 +2893,124 @@ router.put('/machines/:id/notes', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/vendor/machines/:id/notes
+ * Add a new note entry for a machine
+ */
+router.post('/machines/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vendorId = req.user.id;
+
+    const schema = Joi.object({
+      content: Joi.string().min(1).max(2000).required(),
+    });
+
+    const { error, value } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    if (!await verifyMachineOwnership(id, vendorId, res)) return;
+
+    const result = await query(
+      `INSERT INTO machine_notes (machine_id, vendor_id, content)
+       VALUES ($1, $2, $3)
+       RETURNING id, content, created_at`,
+      [id, vendorId, value.content]
+    );
+
+    // Also update the machine's notes field with the latest note
+    await query(
+      `UPDATE vending_machines SET notes = $1, updated_at = NOW() WHERE id = $2`,
+      [value.content, id]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Note added',
+      data: { note: result.rows[0] },
+    });
+  } catch (error) {
+    logger.error('Error adding machine note', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error adding note',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/machines/:id/notes
+ * Get all notes for a machine (newest first)
+ */
+router.get('/machines/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vendorId = req.user.id;
+
+    if (!await verifyMachineOwnership(id, vendorId, res)) return;
+
+    const result = await query(
+      `SELECT id, content, created_at
+       FROM machine_notes
+       WHERE machine_id = $1
+       ORDER BY created_at DESC`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      data: { notes: result.rows },
+    });
+  } catch (error) {
+    logger.error('Error fetching machine notes', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching notes',
+    });
+  }
+});
+
+/**
+ * DELETE /api/vendor/machines/:id/notes/:noteId
+ * Delete a specific note
+ */
+router.delete('/machines/:id/notes/:noteId', async (req, res) => {
+  try {
+    const { id, noteId } = req.params;
+    const vendorId = req.user.id;
+
+    if (!await verifyMachineOwnership(id, vendorId, res)) return;
+
+    const result = await query(
+      `DELETE FROM machine_notes WHERE id = $1 AND machine_id = $2 AND vendor_id = $3 RETURNING id`,
+      [noteId, id, vendorId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Note not found',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Note deleted',
+    });
+  } catch (error) {
+    logger.error('Error deleting machine note', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting note',
+    });
+  }
+});
+
 // ============================================
 // MACHINE VISIT HISTORY ROUTES
 // ============================================
@@ -3493,6 +3803,195 @@ router.get('/inventory/alerts', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching inventory alerts',
+    });
+  }
+});
+
+// ========================================
+// REFERRAL SYSTEM ROUTES
+// ========================================
+
+/**
+ * GET /api/vendor/referral-code
+ * Get or generate the vendor's referral code
+ */
+router.get('/referral-code', async (req, res) => {
+  try {
+    // Check if user already has a referral code
+    const existing = await query(
+      'SELECT referral_code FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    let referralCode = existing.rows[0].referral_code;
+
+    // Generate one if not set
+    if (!referralCode) {
+      // Generate random 8-char alphanumeric code, retry on collision
+      for (let attempt = 0; attempt < 5; attempt++) {
+        referralCode = crypto.randomBytes(4).toString('hex').toUpperCase();
+        try {
+          await query(
+            'UPDATE users SET referral_code = $1 WHERE id = $2',
+            [referralCode, req.user.id]
+          );
+          break;
+        } catch (err) {
+          // Unique constraint violation — try again
+          if (err.code === '23505' && attempt < 4) {
+            referralCode = null;
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      if (!referralCode) {
+        return res.status(500).json({
+          success: false,
+          message: 'Error generating referral code, please try again',
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: { referralCode },
+    });
+  } catch (error) {
+    logger.error('Error getting referral code', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error getting referral code',
+    });
+  }
+});
+
+/**
+ * GET /api/vendor/referrals
+ * Get referral stats and list of referred users
+ */
+router.get('/referrals', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT id, full_name, created_at
+       FROM users
+       WHERE referred_by = $1
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        referrals: result.rows,
+        count: result.rows.length,
+      },
+    });
+  } catch (error) {
+    logger.error('Error fetching referrals', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching referrals',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/reports/share
+ * Generate a shareable report link with vendor's machine stats
+ */
+router.post('/reports/share', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    // Collect vendor's machine stats
+    const machinesResult = await query(
+      `SELECT vm.id, vm.machine_name, vm.location, vm.is_active,
+              COUNT(mp.id) as product_count,
+              COUNT(CASE WHEN mp.is_performing = true THEN 1 END) as performing_count,
+              COUNT(CASE WHEN mp.is_performing = false THEN 1 END) as not_performing_count
+       FROM vending_machines vm
+       LEFT JOIN machine_products mp ON vm.id = mp.machine_id AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+       WHERE vm.vendor_id = $1 AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
+       GROUP BY vm.id
+       ORDER BY vm.created_at DESC`,
+      [vendorId]
+    );
+
+    // Collect active poll data for each machine
+    const pollData = [];
+    for (const machine of machinesResult.rows) {
+      const pollResult = await query(
+        `SELECT sp.id, sp.question,
+                json_agg(json_build_object(
+                  'productName', p.product_name,
+                  'yesVotes', spo.yes_votes,
+                  'noVotes', spo.no_votes
+                ) ORDER BY spo.display_order) as options
+         FROM swipe_polls sp
+         JOIN swipe_poll_options spo ON sp.id = spo.poll_id
+         JOIN products p ON spo.product_id = p.id
+         WHERE sp.machine_id = $1 AND sp.is_active = true
+         GROUP BY sp.id, sp.question
+         LIMIT 1`,
+        [machine.id]
+      );
+
+      if (pollResult.rows.length > 0) {
+        pollData.push({
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          poll: pollResult.rows[0],
+        });
+      }
+    }
+
+    // Build report data
+    const reportData = {
+      generatedAt: new Date().toISOString(),
+      machines: machinesResult.rows,
+      polls: pollData,
+      summary: {
+        totalMachines: machinesResult.rows.length,
+        activeMachines: machinesResult.rows.filter(m => m.is_active).length,
+        totalProducts: machinesResult.rows.reduce((sum, m) => sum + parseInt(m.product_count || 0), 0),
+      },
+    };
+
+    // Generate token and insert
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+    await query(
+      `INSERT INTO shared_reports (vendor_id, token, data, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [vendorId, token, JSON.stringify(reportData), expiresAt]
+    );
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://vending-front-end.vercel.app';
+
+    res.status(201).json({
+      success: true,
+      message: 'Report link generated',
+      data: {
+        token,
+        url: `${frontendUrl}/report/${token}`,
+        expiresAt,
+      },
+    });
+  } catch (error) {
+    logger.error('Error generating shared report', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error generating report link',
     });
   }
 });
