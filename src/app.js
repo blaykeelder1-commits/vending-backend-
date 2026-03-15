@@ -140,8 +140,7 @@ const corsOptions = {
 
     // Check if origin matches allowed list or is a Vercel preview URL
     const isAllowed = allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app') ||
-      origin.includes('vercel.app');
+      origin.endsWith('.vercel.app');
 
     if (isAllowed) {
       callback(null, true);
@@ -461,6 +460,7 @@ app.use('/api/public', publicLimiter, require('./routes/public'));
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api', require('./routes/discounts'));
 
 // 404 handler
 app.use((req, res) => {
