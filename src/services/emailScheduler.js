@@ -44,6 +44,22 @@ async function processScheduledEmails() {
           ...(email.template_data || {}),
         };
 
+        // Enrich onboarding day 10 with estimated savings stats
+        if (email.template_name === 'onboardingDay10') {
+          try {
+            const machineCount = await query(
+              `SELECT COUNT(*) as count FROM machines WHERE vendor_id = $1`,
+              [email.user_id]
+            );
+            const count = parseInt(machineCount.rows[0].count) || 1;
+            templateData.stats = {
+              estimatedMonthlySavings: (count * 75).toString(),
+            };
+          } catch (statsErr) {
+            templateData.stats = { estimatedMonthlySavings: '50-150' };
+          }
+        }
+
         // Send the email
         const sendResult = await sendEmail(email.email, email.template_name, templateData);
 
@@ -191,26 +207,212 @@ async function getSchedulerStats() {
 }
 
 /**
+ * Send spoilage alerts for products expiring within 7 days
+ * Sends directly (not scheduled) since these are time-sensitive
+ */
+async function scheduleSpoilageAlerts() {
+  const results = { checked: 0, sent: 0, errors: [] };
+
+  try {
+    // Find vendors with products expiring within 7 days (stock > 0, email verified)
+    const vendorsResult = await query(`
+      SELECT DISTINCT u.id, u.email, u.full_name
+      FROM users u
+      JOIN machines m ON m.vendor_id = u.id
+      JOIN machine_inventory mi ON mi.machine_id = m.id
+      WHERE u.role = 'vendor'
+        AND u.email_verified = true
+        AND mi.current_stock > 0
+        AND mi.expiration_date IS NOT NULL
+        AND mi.expiration_date <= NOW() + INTERVAL '7 days'
+        AND NOT EXISTS (
+          SELECT 1 FROM email_log el
+          WHERE el.user_id = u.id
+            AND el.template_name = 'spoilageAlert'
+            AND el.created_at > NOW() - INTERVAL '24 hours'
+        )
+      LIMIT 100
+    `);
+
+    results.checked = vendorsResult.rows.length;
+
+    for (const vendor of vendorsResult.rows) {
+      try {
+        // Get expiring products grouped by machine
+        const productsResult = await query(`
+          SELECT
+            m.id as machine_id,
+            m.machine_name,
+            m.location,
+            p.product_name,
+            mi.current_stock,
+            mi.expiration_date,
+            CEIL(EXTRACT(EPOCH FROM (mi.expiration_date - NOW())) / 86400) as days_until_expiry
+          FROM machine_inventory mi
+          JOIN machines m ON mi.machine_id = m.id
+          JOIN products p ON mi.product_id = p.id
+          WHERE m.vendor_id = $1
+            AND mi.current_stock > 0
+            AND mi.expiration_date IS NOT NULL
+            AND mi.expiration_date <= NOW() + INTERVAL '7 days'
+          ORDER BY mi.expiration_date ASC
+        `, [vendor.id]);
+
+        if (productsResult.rows.length === 0) continue;
+
+        // Group by machine
+        const machineMap = {};
+        for (const row of productsResult.rows) {
+          if (!machineMap[row.machine_id]) {
+            machineMap[row.machine_id] = {
+              machineName: row.machine_name,
+              location: row.location,
+              products: [],
+            };
+          }
+          machineMap[row.machine_id].products.push({
+            productName: row.product_name,
+            stock: row.current_stock,
+            daysUntilExpiry: parseInt(row.days_until_expiry),
+          });
+        }
+
+        const alertData = {
+          totalProducts: productsResult.rows.length,
+          machines: Object.values(machineMap),
+        };
+
+        // Send directly (time-sensitive)
+        const sendResult = await sendEmail(vendor.email, 'spoilageAlert', {
+          userName: vendor.full_name || 'there',
+          ...alertData,
+        });
+
+        if (sendResult.success) {
+          // Log to email_log for dedup
+          await query(`
+            INSERT INTO email_log (user_id, email, template_name, subject, status, external_id)
+            VALUES ($1, $2, 'spoilageAlert', 'Spoilage Alert', 'sent', $3)
+          `, [vendor.id, vendor.email, sendResult.id || null]);
+          results.sent++;
+        }
+      } catch (error) {
+        results.errors.push({ vendorId: vendor.id, error: error.message });
+        logger.error('Spoilage alert error for vendor', { vendorId: vendor.id, error: error.message });
+      }
+    }
+
+    return results;
+  } catch (error) {
+    logger.error('Error in scheduleSpoilageAlerts', { error: error.message });
+    throw error;
+  }
+}
+
+/**
+ * Process onboarding emails for users based on their registration date.
+ * Acts as a safety net: schedules onboarding emails for users who may not
+ * have had them scheduled at registration time (e.g., existing users before
+ * the onboarding sequence was added).
+ * Safe to run multiple times -- checks for existing scheduled/sent emails.
+ */
+async function processOnboardingEmails() {
+  const results = { checked: 0, scheduled: 0 };
+
+  const onboardingSteps = [
+    { day: 2, template: 'onboardingDay2' },
+    { day: 5, template: 'onboardingDay5' },
+    { day: 10, template: 'onboardingDay10' },
+    { day: 13, template: 'onboardingDay13' },
+  ];
+
+  try {
+    for (const step of onboardingSteps) {
+      // Find users who registered X days ago (within a 24-hour window)
+      // and don't already have this email scheduled or sent
+      const usersResult = await query(`
+        SELECT u.id, u.email, u.full_name
+        FROM users u
+        WHERE u.role = 'vendor'
+          AND u.email_verified = true
+          AND u.created_at >= NOW() - INTERVAL '${step.day} days' - INTERVAL '12 hours'
+          AND u.created_at <= NOW() - INTERVAL '${step.day} days' + INTERVAL '12 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM scheduled_emails se
+            WHERE se.user_id = u.id
+              AND se.template_name = $1
+              AND se.status IN ('pending', 'sent')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM email_log el
+            WHERE el.user_id = u.id
+              AND el.template_name = $1
+              AND el.status = 'sent'
+          )
+        LIMIT 100
+      `, [step.template]);
+
+      results.checked += usersResult.rows.length;
+
+      for (const user of usersResult.rows) {
+        try {
+          await query(`
+            INSERT INTO scheduled_emails (user_id, email, template_name, scheduled_for, status)
+            VALUES ($1, $2, $3, NOW(), 'pending')
+            ON CONFLICT DO NOTHING
+          `, [user.id, user.email, step.template]);
+
+          results.scheduled++;
+        } catch (err) {
+          logger.error('Error scheduling onboarding email', {
+            userId: user.id,
+            template: step.template,
+            error: err.message,
+          });
+        }
+      }
+    }
+
+    if (results.scheduled > 0) {
+      logger.info('Onboarding emails scheduled', results);
+    }
+
+    return results;
+  } catch (error) {
+    logger.error('Error in processOnboardingEmails', { error: error.message });
+    throw error;
+  }
+}
+
+/**
  * Run all scheduler tasks (call this from cron)
  */
 async function runSchedulerTasks() {
 
   const results = {
     timestamp: new Date().toISOString(),
+    onboarding: null,
     reEngagement: null,
     processing: null,
     cleanup: null,
+    spoilageAlerts: null,
   };
 
   try {
-    // 1. Schedule re-engagement emails for inactive users
+    // 1. Schedule onboarding emails for users at day 2, 5, 10, 13
+    results.onboarding = await processOnboardingEmails();
+
+    // 2. Schedule re-engagement emails for inactive users
     results.reEngagement = await scheduleReEngagementEmails();
 
-    // 2. Process all due scheduled emails
+    // 3. Process all due scheduled emails
     results.processing = await processScheduledEmails();
 
-    // 3. Clean up old records
+    // 4. Clean up old records
     results.cleanup = await cleanupOldEmails();
+
+    // 5. Send spoilage alerts
+    results.spoilageAlerts = await scheduleSpoilageAlerts();
 
     return results;
   } catch (error) {
@@ -221,7 +423,9 @@ async function runSchedulerTasks() {
 
 module.exports = {
   processScheduledEmails,
+  processOnboardingEmails,
   scheduleReEngagementEmails,
+  scheduleSpoilageAlerts,
   cleanupOldEmails,
   getSchedulerStats,
   runSchedulerTasks,

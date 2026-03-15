@@ -67,9 +67,9 @@ const templates = {
     `,
   }),
 
-  // Onboarding Day 2 - Add first machine reminder
+  // Onboarding Day 2 - Add first machine and print QR code
   onboardingDay2: (userName) => ({
-    subject: 'Quick Tip: Add Your First Machine in 60 Seconds',
+    subject: 'Your first step: Add a machine and print your QR code',
     html: `
       <!DOCTYPE html>
       <html>
@@ -81,8 +81,7 @@ const templates = {
           .header { background: #4F46E5; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
           .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; }
           .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
-          .step { background: #F3F4F6; padding: 15px; margin: 10px 0; border-radius: 6px; }
-          .step-number { background: #4F46E5; color: white; width: 24px; height: 24px; border-radius: 50%; display: inline-block; text-align: center; margin-right: 10px; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
         </style>
       </head>
       <body>
@@ -92,23 +91,17 @@ const templates = {
           </div>
           <div class="content">
             <p>Hi ${userName},</p>
-            <p>Ready to see IDDI in action? Here's how to add your first machine:</p>
-
-            <div class="step">
-              <span class="step-number">1</span> Click "Add Machine" from your dashboard
-            </div>
-            <div class="step">
-              <span class="step-number">2</span> Enter the machine name and location
-            </div>
-            <div class="step">
-              <span class="step-number">3</span> That's it! Your QR code is auto-generated
-            </div>
+            <p>The fastest way to start seeing results with IDDI: add your first machine, generate the QR code, and print it out. It takes about 60 seconds and everything you need is on your dashboard.</p>
+            <p>Once the QR code is on your machine, customers can start telling you what they actually want to buy.</p>
 
             <center>
-              <a href="${FRONTEND_URL}/vendor/machines" class="button">Add Machine Now</a>
+              <a href="${FRONTEND_URL}/vendor/machines" class="button">Go to Dashboard</a>
             </center>
 
-            <p>Once added, you can start tracking inventory and customer preferences right away.</p>
+            <p>Happy vending,<br>The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
           </div>
         </div>
       </body>
@@ -116,9 +109,9 @@ const templates = {
     `,
   }),
 
-  // Onboarding Day 5 - Introduce performance tracking
-  onboardingDay5: (userName) => ({
-    subject: 'Pro Tip: Find Out Which Products Actually Sell',
+  // Onboarding Day 5 - Encourage QR code placement and voting
+  onboardingDay5: (userName, stats) => ({
+    subject: 'Your customers are ready to vote',
     html: `
       <!DOCTYPE html>
       <html>
@@ -130,27 +123,115 @@ const templates = {
           .header { background: #10B981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
           .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; }
           .button { display: inline-block; background: #10B981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
-          .highlight { background: #ECFDF5; border-left: 4px solid #10B981; padding: 15px; margin: 20px 0; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
         </style>
       </head>
       <body>
         <div class="container">
           <div class="header">
-            <h2 style="margin: 0;">Know What Sells, What Doesn't</h2>
+            <h2 style="margin: 0;">Get Your First Votes</h2>
           </div>
           <div class="content">
             <p>Hi ${userName},</p>
-            <p>Ever wondered which products are just taking up space?</p>
-
-            <div class="highlight">
-              <strong>Performance Tracking</strong> lets you mark products as "performing" or "not performing" at each machine. Over time, you'll see patterns that help you make better stocking decisions.
-            </div>
-
-            <p><strong>The result?</strong> Less waste, more sales, happier customers.</p>
+            <p>Have you stuck your QR code on your machine yet? When customers scan it, they swipe to vote on the products they want to see. It's like a focus group that runs 24/7 -- for free.</p>
+            <p>The sooner you get votes, the sooner you know what to stock.</p>
 
             <center>
-              <a href="${FRONTEND_URL}/vendor/machines" class="button">Start Tracking Performance</a>
+              <a href="${FRONTEND_URL}/vendor/dashboard" class="button">Check Your Dashboard</a>
             </center>
+
+            <p>Happy vending,<br>The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // Onboarding Day 10 - Show estimated impact and referral program
+  onboardingDay10: (userName, stats) => ({
+    subject: 'How IDDI is working for you',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
+          .highlight { background: #EEF2FF; border-left: 4px solid #4F46E5; padding: 15px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h2 style="margin: 0;">Your IDDI Impact</h2>
+          </div>
+          <div class="content">
+            <p>Hi ${userName},</p>
+            <p>Based on operators like you, IDDI helps reduce spoilage by 25% and increase sales by 18%. That could mean an extra $${stats && stats.estimatedMonthlySavings ? stats.estimatedMonthlySavings : '50-150'} per month across your machines.</p>
+
+            <center>
+              <a href="${FRONTEND_URL}/vendor/dashboard" class="button">View Your Dashboard</a>
+            </center>
+
+            <div class="highlight">
+              <strong>Know another operator?</strong> Share your referral link and you both get a free month.
+            </div>
+
+            <p>Happy vending,<br>The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // Onboarding Day 13 - Gentle upgrade prompt
+  onboardingDay13: (userName) => ({
+    subject: 'Ready to add more machines?',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #7C3AED; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; }
+          .button { display: inline-block; background: #7C3AED; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h2 style="margin: 0;">Scale Your Operation</h2>
+          </div>
+          <div class="content">
+            <p>Hi ${userName},</p>
+            <p>You've been using IDDI on 1 machine. Growth ($19/mo) lets you manage up to 10 machines -- that's less than $2 per machine per month.</p>
+            <p>Not ready? No problem -- your free machine is yours forever.</p>
+
+            <center>
+              <a href="${FRONTEND_URL}/vendor/pricing" class="button">See Pricing</a>
+            </center>
+
+            <p>Happy vending,<br>The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
           </div>
         </div>
       </body>
@@ -306,6 +387,134 @@ const templates = {
     `,
   }),
 
+  // Lead magnet delivery - sent when someone downloads a resource
+  leadMagnetDelivery: (userName, leadMagnet) => {
+    const magnetLinks = {
+      startup_kit: {
+        title: 'Vending Machine Startup Kit',
+        description: 'Your complete guide to starting and growing a vending machine business.',
+        ctaText: 'Download Your Startup Kit',
+        ctaUrl: `${FRONTEND_URL}/resources/startup-kit`,
+      },
+      calculator_results: {
+        title: 'Your Vending ROI Calculator Results',
+        description: 'Your personalized vending machine profitability analysis is ready.',
+        ctaText: 'View Your Results',
+        ctaUrl: `${FRONTEND_URL}/calculator/results`,
+      },
+      location_guide: {
+        title: 'Best Vending Machine Locations Guide',
+        description: 'Our top picks for high-traffic vending locations and how to secure them.',
+        ctaText: 'Download Location Guide',
+        ctaUrl: `${FRONTEND_URL}/resources/location-guide`,
+      },
+    };
+
+    const magnet = magnetLinks[leadMagnet] || {
+      title: 'Your IDDI Resource',
+      description: 'Thanks for your interest! Here is your requested resource.',
+      ctaText: 'Access Your Resource',
+      ctaUrl: `${FRONTEND_URL}/resources`,
+    };
+
+    return {
+      subject: `Your download is ready: ${magnet.title}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+            .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+            .button { display: inline-block; background: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-size: 16px; }
+            .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+            .highlight { background: #EEF2FF; border-left: 4px solid #4F46E5; padding: 15px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1 style="margin: 0;">${magnet.title}</h1>
+            </div>
+            <div class="content">
+              <p>Hi there,</p>
+              <p>${magnet.description}</p>
+
+              <center>
+                <a href="${magnet.ctaUrl}" class="button">${magnet.ctaText}</a>
+              </center>
+
+              <div class="highlight">
+                <strong>Want to put these insights into action?</strong><br>
+                IDDI helps vending operators track inventory, run customer polls, and optimize product placement - all from one dashboard.
+              </div>
+
+              <center>
+                <a href="${FRONTEND_URL}/vendor/register" style="color: #4F46E5; font-weight: bold;">Try IDDI Free</a>
+              </center>
+
+              <p style="margin-top: 30px;">- The IDDI Team</p>
+            </div>
+            <div class="footer">
+              <p>IDDI - Smart Vending Machine Management</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `,
+    };
+  },
+
+  // Referral notification - sent to referrer when someone signs up via their code
+  referralNotification: (userName, referredName) => ({
+    subject: `${referredName} just joined IDDI through your referral!`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #10B981 0%, #059669 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #10B981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+          .celebration { font-size: 48px; text-align: center; margin: 10px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">New Referral!</h1>
+          </div>
+          <div class="content">
+            <div class="celebration">&#127881;</div>
+            <p>Hi ${userName},</p>
+            <p>Great news! <strong>${referredName}</strong> just signed up for IDDI using your referral link.</p>
+
+            <p>Thanks for spreading the word about smarter vending machine management. Keep sharing your referral link to grow the community!</p>
+
+            <center>
+              <a href="${FRONTEND_URL}/vendor/dashboard" class="button">View Your Referrals</a>
+            </center>
+
+            <p>- The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
   // Password changed confirmation
   passwordChanged: (userName) => ({
     subject: 'Your IDDI password has been changed',
@@ -353,6 +562,77 @@ const templates = {
       </html>
     `,
   }),
+
+  // Spoilage alert - automated notification for expiring products
+  spoilageAlert: (userName, alertData) => ({
+    subject: `Action Required: ${alertData.totalProducts} product(s) expiring soon`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #DC2626; color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #DC2626; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-size: 16px; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+          .machine-group { background: #FEF2F2; border: 1px solid #FECACA; border-radius: 8px; padding: 16px; margin: 16px 0; }
+          .product-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #FEE2E2; }
+          .product-row:last-child { border-bottom: none; }
+          .days-badge { background: #DC2626; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+          .days-badge.warning { background: #F59E0B; }
+          .suggestions { background: #EEF2FF; border-left: 4px solid #4F46E5; padding: 16px; margin: 20px 0; border-radius: 0 8px 8px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">Spoilage Alert</h1>
+            <p style="margin: 10px 0 0 0; opacity: 0.9;">${alertData.totalProducts} product(s) expiring within 7 days</p>
+          </div>
+          <div class="content">
+            <p>Hi ${userName},</p>
+            <p>The following products in your vending machines are expiring soon and may need attention:</p>
+
+            ${alertData.machines.map(machine => `
+              <div class="machine-group">
+                <h3 style="margin: 0 0 12px 0;">${machine.machineName} — ${machine.location}</h3>
+                ${machine.products.map(product => `
+                  <div class="product-row">
+                    <span>${product.productName} (qty: ${product.stock})</span>
+                    <span class="days-badge${product.daysUntilExpiry > 3 ? ' warning' : ''}">${product.daysUntilExpiry <= 0 ? 'EXPIRED' : product.daysUntilExpiry + 'd left'}</span>
+                  </div>
+                `).join('')}
+              </div>
+            `).join('')}
+
+            <div class="suggestions">
+              <h3 style="margin: 0 0 8px 0;">Suggested Actions</h3>
+              <ul style="margin: 0; padding-left: 20px;">
+                <li><strong>Redistribute</strong> — Move soon-to-expire products to higher-traffic machines</li>
+                <li><strong>Discount</strong> — Consider marking down prices to clear stock</li>
+                <li><strong>Remove</strong> — Pull expired products to maintain quality</li>
+              </ul>
+            </div>
+
+            <center>
+              <a href="${FRONTEND_URL}/vendor/expiring" class="button">Review Expiring Products</a>
+            </center>
+
+            <p>Stay on top of your inventory to reduce waste and protect margins.</p>
+            <p>- The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
 };
 
 // Send email function
@@ -373,6 +653,14 @@ async function sendEmail(to, templateName, templateData = {}) {
       emailContent = template(templateData.userName || 'there', templateData.verificationCode);
     } else if (templateName === 'passwordReset') {
       emailContent = template(templateData.userName || 'there', templateData.resetToken);
+    } else if (templateName === 'leadMagnetDelivery') {
+      emailContent = template(templateData.userName || 'there', templateData.leadMagnet);
+    } else if (templateName === 'referralNotification') {
+      emailContent = template(templateData.userName || 'there', templateData.referredName || 'Someone');
+    } else if (templateName === 'spoilageAlert') {
+      emailContent = template(templateData.userName || 'there', templateData);
+    } else if (templateName === 'onboardingDay5' || templateName === 'onboardingDay10') {
+      emailContent = template(templateData.userName || 'there', templateData.stats || {});
     } else {
       emailContent = template(templateData.userName || 'there');
     }
@@ -404,6 +692,8 @@ async function scheduleOnboardingSequence(userId, email, userName) {
     const scheduledEmails = [
       { template: 'onboardingDay2', sendAt: 'NOW() + INTERVAL \'2 days\'' },
       { template: 'onboardingDay5', sendAt: 'NOW() + INTERVAL \'5 days\'' },
+      { template: 'onboardingDay10', sendAt: 'NOW() + INTERVAL \'10 days\'' },
+      { template: 'onboardingDay13', sendAt: 'NOW() + INTERVAL \'13 days\'' },
     ];
 
     for (const scheduled of scheduledEmails) {
