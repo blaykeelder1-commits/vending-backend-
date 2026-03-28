@@ -516,7 +516,7 @@ const templates = {
     };
 
     return {
-      subject: `Your download is ready: ${magnet.title}`,
+      subject: `Your ${magnet.title} is ready!`,
       html: `
         <!DOCTYPE html>
         <html>
@@ -539,7 +539,7 @@ const templates = {
               <h1 style="margin: 0;">${magnet.title}</h1>
             </div>
             <div class="content">
-              <p>Hi there,</p>
+              <p>Hi ${userName || 'there'},</p>
               <p>${magnet.description}</p>
 
               <center>
