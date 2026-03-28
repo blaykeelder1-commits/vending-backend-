@@ -8,9 +8,13 @@ if (process.env.RESEND_API_KEY) {
 } else {
 }
 
-// Use Resend's onboarding email until a custom domain is verified
-// To use your own domain, verify it at https://resend.com/domains and set RESEND_FROM_EMAIL
+// Set RESEND_FROM_EMAIL to your verified domain email (e.g., 'IDDI <hello@yourdomain.com>')
+// Fallback to Resend's sandbox email (only delivers to account owner — NOT production-ready)
 const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'IDDI <onboarding@resend.dev>';
+const IS_SANDBOX = !process.env.RESEND_FROM_EMAIL || FROM_EMAIL.includes('resend.dev');
+if (IS_SANDBOX) {
+  console.warn('[Email] WARNING: Using Resend sandbox mode. Emails only deliver to account owner. Set RESEND_FROM_EMAIL to a verified domain.');
+}
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vending-front-end.vercel.app';
 
 // Email Templates
@@ -232,6 +236,100 @@ const templates = {
           </div>
           <div class="footer">
             <p>IDDI - Smart Vending Machine Management</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // Weekly Digest - sent every Monday with performance summary
+  weeklyDigest: (userName, stats) => ({
+    subject: `Your Weekly IDDI Report — ${stats.topProduct || 'See your stats'}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color: white; padding: 24px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #fff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; }
+          .stat-grid { display: flex; gap: 12px; margin: 20px 0; }
+          .stat-card { flex: 1; background: #F9FAFB; border-radius: 8px; padding: 16px; text-align: center; }
+          .stat-number { font-size: 28px; font-weight: 800; color: #4F46E5; }
+          .stat-label { font-size: 12px; color: #6B7280; text-transform: uppercase; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
+          .highlight { background: #EEF2FF; border-left: 4px solid #4F46E5; padding: 15px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+          .alert { background: #FEF3C7; border-left: 4px solid #F59E0B; padding: 12px 15px; margin: 15px 0; border-radius: 0 6px 6px 0; }
+          .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+          .tip { background: #F0FDF4; border: 1px solid #BBF7D0; padding: 16px; border-radius: 8px; margin: 20px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h2 style="margin: 0 0 4px;">Weekly Report</h2>
+            <p style="margin: 0; opacity: 0.9; font-size: 14px;">${stats.weekRange || 'This week'}</p>
+          </div>
+          <div class="content">
+            <p>Hi ${userName},</p>
+            <p>Here's how your machines performed this week:</p>
+
+            <div class="stat-grid">
+              <div class="stat-card">
+                <div class="stat-number">${stats.totalVotes || 0}</div>
+                <div class="stat-label">Customer Votes</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-number">${stats.qrScans || 0}</div>
+                <div class="stat-label">QR Scans</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-number">${stats.machineCount || 0}</div>
+                <div class="stat-label">Active Machines</div>
+              </div>
+            </div>
+
+            ${stats.topProduct ? `
+            <div class="highlight">
+              <strong>🏆 Top Product This Week:</strong> ${stats.topProduct}
+              ${stats.topProductVotes ? ` — ${stats.topProductVotes} votes` : ''}
+            </div>
+            ` : ''}
+
+            ${stats.expiringCount > 0 ? `
+            <div class="alert">
+              <strong>⚠️ ${stats.expiringCount} product${stats.expiringCount > 1 ? 's' : ''} expiring soon.</strong>
+              Check your dashboard to redistribute or discount before they expire.
+            </div>
+            ` : ''}
+
+            ${stats.newSuggestions > 0 ? `
+            <p>💡 <strong>${stats.newSuggestions} new product suggestion${stats.newSuggestions > 1 ? 's' : ''}</strong> from customers this week. <a href="${FRONTEND_URL}/vendor/suggestions" style="color: #4F46E5;">Review them →</a></p>
+            ` : ''}
+
+            <div class="tip">
+              <strong>💡 Tip of the Week:</strong> ${stats.tip || 'Operators who check poll results weekly and swap underperformers see an average 18% revenue increase within 60 days.'}
+            </div>
+
+            <center>
+              <a href="${FRONTEND_URL}/vendor/dashboard" class="button">View Full Dashboard</a>
+            </center>
+
+            ${stats.referralCount !== undefined ? `
+            <p style="text-align: center; color: #6B7280; font-size: 14px; margin-top: 24px; border-top: 1px solid #e5e7eb; padding-top: 16px;">
+              📣 You've referred <strong>${stats.referralCount}</strong> operator${stats.referralCount !== 1 ? 's' : ''}.
+              <a href="${FRONTEND_URL}/vendor/dashboard" style="color: #4F46E5;">Share your link</a> — both of you get a free month.
+            </p>
+            ` : ''}
+
+            <p>Happy vending,<br>The IDDI Team</p>
+          </div>
+          <div class="footer">
+            <p>IDDI - Smart Vending Machine Management</p>
+            <p style="font-size: 12px;"><a href="${FRONTEND_URL}/vendor/settings" style="color: #6b7280;">Manage email preferences</a></p>
           </div>
         </div>
       </body>
@@ -660,6 +758,8 @@ async function sendEmail(to, templateName, templateData = {}) {
     } else if (templateName === 'spoilageAlert') {
       emailContent = template(templateData.userName || 'there', templateData);
     } else if (templateName === 'onboardingDay5' || templateName === 'onboardingDay10') {
+      emailContent = template(templateData.userName || 'there', templateData.stats || {});
+    } else if (templateName === 'weeklyDigest') {
       emailContent = template(templateData.userName || 'there', templateData.stats || {});
     } else {
       emailContent = template(templateData.userName || 'there');
