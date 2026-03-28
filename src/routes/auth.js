@@ -44,6 +44,7 @@ const vendorRegisterSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
   fullName: Joi.string().min(2).required(),
+  referralCode: Joi.string().max(8).optional(),
 });
 
 const vendorLoginSchema = Joi.object({
@@ -81,13 +82,48 @@ router.post('/vendor/register', async (req, res) => {
       });
     }
 
-    const { email, password, fullName } = value;
+    const { email, password, fullName, referralCode } = value;
 
     // Normalize email
     const normalizedEmail = email.toLowerCase().trim();
 
+    // Look up referrer if referral code was provided
+    let referredBy = null;
+    if (referralCode) {
+      const referrerResult = await query(
+        'SELECT id FROM users WHERE referral_code = $1',
+        [referralCode]
+      );
+      if (referrerResult.rows.length > 0) {
+        referredBy = referrerResult.rows[0].id;
+      }
+    }
+
     // Create vendor user
     const user = await User.createVendor({ email: normalizedEmail, password, fullName });
+
+    // Set referred_by if we found a valid referrer
+    if (referredBy) {
+      await query(
+        'UPDATE users SET referred_by = $1 WHERE id = $2',
+        [referredBy, user.id]
+      );
+
+      // Notify the referrer (fire and forget)
+      const referrerResult = await query(
+        'SELECT email, full_name FROM users WHERE id = $1',
+        [referredBy]
+      );
+      if (referrerResult.rows.length > 0) {
+        const referrer = referrerResult.rows[0];
+        sendEmail(referrer.email, 'referralNotification', {
+          userName: referrer.full_name,
+          referredName: fullName,
+        }).catch(err => {
+          logger.error('Error sending referral notification', { error: err.message });
+        });
+      }
+    }
 
     // Generate verification code
     const verificationCode = generateVerificationCode();

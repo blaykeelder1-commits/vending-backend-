@@ -81,7 +81,7 @@ cron.schedule('0 * * * *', async () => {
     // Clean up expired sessions
     try {
       const result = await pool.query(
-        'DELETE FROM customer_sessions WHERE id IN (SELECT id FROM customer_sessions WHERE expires_at < NOW() LIMIT 5000)'
+        'DELETE FROM customer_sessions WHERE expires_at < NOW()'
       );
       logger.info('Cron: Session cleanup complete', { expiredSessions: result.rowCount });
     } catch (error) {
@@ -137,6 +137,15 @@ cron.schedule('0 0 * * *', async () => {
     // Clean up old analytics events (keep 90 days)
     const cleanupResult = await analyticsAggregator.cleanupOldEvents();
     logger.info('Cron: Old analytics events cleaned up', { deletedEvents: cleanupResult.deletedEvents });
+
+    // Send spoilage alerts
+    try {
+      const { scheduleSpoilageAlerts } = require('./services/emailScheduler');
+      const spoilageResult = await scheduleSpoilageAlerts();
+      logger.info('Cron: Spoilage alerts sent', spoilageResult);
+    } catch (error) {
+      logger.error('Cron: Spoilage alert error', { error: error.message });
+    }
   } catch (error) {
     logger.error('Cron: Daily analytics aggregation error', { error: error.message });
     if (process.env.SENTRY_DSN) {
