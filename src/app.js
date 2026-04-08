@@ -138,9 +138,9 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Check if origin matches allowed list or is a Vercel preview URL
+    // Check if origin matches allowed list or is a Vercel preview URL for this project
     const isAllowed = allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app');
+      (origin.endsWith('.vercel.app') && origin.includes('vending-front-end'));
 
     if (isAllowed) {
       callback(null, true);

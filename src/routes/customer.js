@@ -354,10 +354,10 @@ const verifySession = async (req, res, next) => {
 
     const session = result.rows[0];
 
-    // IP validation — allow 1 IP change (for mobile network switches)
+    // IP validation — allow up to 3 IP changes (mobile WiFi/cellular switches)
     if (session.ip_address && req.ip !== session.ip_address) {
       const changeCount = session.ip_change_count || 0;
-      if (changeCount >= 1) {
+      if (changeCount >= 3) {
         return res.status(401).json({
           success: false,
           message: 'Session invalidated due to suspicious IP change',
@@ -585,13 +585,18 @@ router.get('/polls', verifySession, async (req, res) => {
 
         const newPoll = pollInsert.rows[0];
 
-        // Insert poll options for each product
-        for (let i = 0; i < productsToShow.length; i++) {
-          const product = productsToShow[i];
+        // Batch insert poll options for all products
+        if (productsToShow.length > 0) {
+          const optionParams = [newPoll.id];
+          const optionPlaceholders = productsToShow.map((product, i) => {
+            const base = optionParams.length;
+            optionParams.push(product.product_name, product.image_url, product.product_id);
+            return `($1, $${base + 1}, $${base + 2}, $${base + 3}, ${i + 1})`;
+          });
           await client.query(
             `INSERT INTO poll_options (poll_id, option_text, image_url, product_id, display_order)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [newPoll.id, product.product_name, product.image_url, product.product_id, i + 1]
+             VALUES ${optionPlaceholders.join(', ')}`,
+            optionParams
           );
         }
 
@@ -698,29 +703,16 @@ router.post('/polls/:pollId/vote', verifySession, async (req, res) => {
       });
     }
 
-    // Use transaction with row-level lock to prevent duplicate votes
-    const voteResult = await transaction(async (client) => {
-      // Check if already voted with FOR UPDATE SKIP LOCKED to prevent race condition
-      const existingVote = await client.query(
-        `SELECT id FROM poll_votes WHERE poll_option_id = $1 AND session_id = $2 FOR UPDATE`,
-        [optionId, sessionId]
-      );
+    // Insert vote, ignoring duplicates via unique constraint
+    const voteResult = await query(
+      `INSERT INTO poll_votes (poll_id, poll_option_id, session_id, vote_type)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (poll_option_id, session_id) DO NOTHING
+       RETURNING id`,
+      [pollId, optionId, sessionId, voteType]
+    );
 
-      if (existingVote.rows.length > 0) {
-        return { alreadyVoted: true };
-      }
-
-      // Record vote
-      await client.query(
-        `INSERT INTO poll_votes (poll_id, poll_option_id, session_id, vote_type)
-         VALUES ($1, $2, $3, $4)`,
-        [pollId, optionId, sessionId, voteType]
-      );
-
-      return { alreadyVoted: false };
-    });
-
-    if (voteResult.alreadyVoted) {
+    if (voteResult.rows.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'You have already voted on this product',

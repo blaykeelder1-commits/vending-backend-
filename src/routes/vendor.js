@@ -3965,17 +3965,25 @@ router.post('/reports/share', async (req, res) => {
     const pollData = [];
     for (const machine of machinesResult.rows) {
       const pollResult = await query(
-        `SELECT sp.id, sp.question,
+        `SELECT pl.id, pl.poll_question as question,
                 json_agg(json_build_object(
-                  'productName', p.product_name,
-                  'yesVotes', spo.yes_votes,
-                  'noVotes', spo.no_votes
-                ) ORDER BY spo.display_order) as options
-         FROM swipe_polls sp
-         JOIN swipe_poll_options spo ON sp.id = spo.poll_id
-         JOIN products p ON spo.product_id = p.id
-         WHERE sp.machine_id = $1 AND sp.is_active = true
-         GROUP BY sp.id, sp.question
+                  'productName', opt.product_name,
+                  'yesVotes', opt.yes_votes,
+                  'noVotes', opt.no_votes
+                ) ORDER BY opt.display_order) as options
+         FROM polls pl
+         JOIN LATERAL (
+           SELECT po.id, po.display_order, p.product_name,
+                  COUNT(CASE WHEN pv.vote_type = 'like' THEN 1 END)::int as yes_votes,
+                  COUNT(CASE WHEN pv.vote_type = 'dislike' THEN 1 END)::int as no_votes
+           FROM poll_options po
+           JOIN products p ON po.product_id = p.id
+           LEFT JOIN poll_votes pv ON po.id = pv.poll_option_id
+           WHERE po.poll_id = pl.id
+           GROUP BY po.id, po.display_order, p.product_name
+         ) opt ON true
+         WHERE pl.machine_id = $1 AND pl.is_active = true
+         GROUP BY pl.id, pl.poll_question
          LIMIT 1`,
         [machine.id]
       );

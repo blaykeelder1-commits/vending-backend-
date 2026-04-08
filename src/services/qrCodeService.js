@@ -13,10 +13,16 @@ const IV_LENGTH = 16;
 function getEncryptionKey() {
   const key = process.env.QR_ENCRYPTION_KEY;
   if (!key) {
-    logger.warn('QR_ENCRYPTION_KEY not set - using insecure default. Set this in production!');
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('QR_ENCRYPTION_KEY is required in production. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+    }
+    logger.warn('QR_ENCRYPTION_KEY not set - using insecure default for development only');
     return Buffer.from('12345678901234567890123456789012', 'utf8');
   }
   if (key.length < 32) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('QR_ENCRYPTION_KEY must be at least 32 characters');
+    }
     logger.warn('QR_ENCRYPTION_KEY is less than 32 characters - padding to 32');
     return Buffer.from(key.padEnd(32, '0'), 'utf8');
   }

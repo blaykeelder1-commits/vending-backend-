@@ -14,6 +14,7 @@ const logger = require('../utils/logger');
 // Event buffer for batch inserts
 const eventBuffer = [];
 const BUFFER_SIZE = 50;
+const MAX_BUFFER_SIZE = 500; // Hard cap to prevent OOM if DB is down
 const BUFFER_FLUSH_INTERVAL = 10000; // 10 seconds
 
 // Valid event types
@@ -53,6 +54,12 @@ async function trackEvent({
     user_agent: userAgent,
     created_at: new Date(),
   };
+
+  // Drop oldest events if buffer exceeds hard cap (DB likely down)
+  if (eventBuffer.length >= MAX_BUFFER_SIZE) {
+    const dropped = eventBuffer.splice(0, eventBuffer.length - MAX_BUFFER_SIZE + 1);
+    logger.warn('Analytics buffer overflow — dropped oldest events', { droppedCount: dropped.length });
+  }
 
   eventBuffer.push(event);
 

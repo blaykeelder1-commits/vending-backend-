@@ -264,18 +264,18 @@ router.get('/embed/poll/:machineId', embedPollLimiter, async (req, res) => {
 
     // Get active poll with products
     const pollResult = await query(
-      `SELECT sp.id, sp.question, sp.created_at,
+      `SELECT p.id, p.poll_question as question, p.created_at,
               json_agg(json_build_object(
-                'id', spo.id,
-                'productName', p.product_name,
-                'imageUrl', p.image_url
-              ) ORDER BY spo.display_order) as options
-       FROM swipe_polls sp
-       JOIN swipe_poll_options spo ON sp.id = spo.poll_id
-       JOIN products p ON spo.product_id = p.id
-       WHERE sp.machine_id = $1 AND sp.is_active = true
-       GROUP BY sp.id, sp.question, sp.created_at
-       ORDER BY sp.created_at DESC
+                'id', po.id,
+                'productName', pr.product_name,
+                'imageUrl', pr.image_url
+              ) ORDER BY po.display_order) as options
+       FROM polls p
+       JOIN poll_options po ON p.id = po.poll_id
+       JOIN products pr ON po.product_id = pr.id
+       WHERE p.machine_id = $1 AND p.is_active = true
+       GROUP BY p.id, p.poll_question, p.created_at
+       ORDER BY p.created_at DESC
        LIMIT 1`,
       [machineIdNum]
     );

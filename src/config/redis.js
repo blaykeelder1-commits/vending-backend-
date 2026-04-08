@@ -81,8 +81,7 @@ class RedisRateLimitStore {
 
   async increment(key) {
     if (!redis) {
-      // Fallback handled by express-rate-limit's default memory store
-      return { totalHits: 0, resetTime: new Date(Date.now() + this.windowMs) };
+      return this._incrementMemory(key);
     }
 
     const redisKey = this.prefix + key;
@@ -100,9 +99,23 @@ class RedisRateLimitStore {
       const resetTime = new Date(Date.now() + (ttl > 0 ? ttl : this.windowMs));
       return { totalHits, resetTime };
     } catch (error) {
-      logger.error('Redis rate limit error', { error: error.message });
-      return { totalHits: 0, resetTime: new Date(Date.now() + this.windowMs) };
+      logger.error('Redis rate limit error — falling back to memory', { error: error.message });
+      return this._incrementMemory(key);
     }
+  }
+
+  // In-memory fallback when Redis is unavailable
+  _incrementMemory(key) {
+    if (!this._memHits) this._memHits = new Map();
+    const now = Date.now();
+    const entry = this._memHits.get(key);
+    if (!entry || now > entry.resetTime) {
+      const resetTime = now + this.windowMs;
+      this._memHits.set(key, { totalHits: 1, resetTime });
+      return { totalHits: 1, resetTime: new Date(resetTime) };
+    }
+    entry.totalHits++;
+    return { totalHits: entry.totalHits, resetTime: new Date(entry.resetTime) };
   }
 
   async decrement(key) {
