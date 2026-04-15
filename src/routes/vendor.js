@@ -175,6 +175,25 @@ router.post('/machines', async (req, res) => {
       });
     }
 
+    // Check machine limit based on subscription tier
+    const limitCheck = await query(
+      `SELECT
+        (SELECT COUNT(*) FROM vending_machines WHERE vendor_id = $1) as machine_count,
+        COALESCE(u.machine_limit, 1) as machine_limit,
+        COALESCE(u.subscription_tier, 'free') as tier
+      FROM users u WHERE u.id = $1`,
+      [req.user.id]
+    );
+    const { machine_count, machine_limit, tier } = limitCheck.rows[0];
+    if (parseInt(machine_count) >= parseInt(machine_limit)) {
+      return res.status(403).json({
+        success: false,
+        message: `You've reached your ${tier} plan limit of ${machine_limit} machine${machine_limit > 1 ? 's' : ''}. Upgrade to add more.`,
+        code: 'MACHINE_LIMIT_REACHED',
+        data: { currentCount: parseInt(machine_count), limit: parseInt(machine_limit), tier },
+      });
+    }
+
     const { machineName, location, googleSheetId } = value;
 
     // Use transaction to ensure atomic machine creation with QR code

@@ -272,6 +272,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// Square webhook needs raw body for signature verification — mount BEFORE JSON parser
+app.use('/api/subscription/webhook', express.raw({ type: 'application/json' }));
+
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -461,6 +464,7 @@ app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api', require('./routes/discounts'));
+app.use('/api/subscription', authenticatedLimiter, require('./routes/subscription'));
 
 // 404 handler
 app.use((req, res) => {

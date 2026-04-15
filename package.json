@@ -13,10 +13,17 @@
   },
   "jest": {
     "testEnvironment": "node",
-    "testMatch": ["**/*.test.js"],
-    "testPathIgnorePatterns": ["/node_modules/", "setup.js"],
+    "testMatch": [
+      "**/*.test.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "setup.js"
+    ],
     "testTimeout": 10000,
-    "setupFilesAfterEnv": ["<rootDir>/src/__tests__/setup.js"],
+    "setupFilesAfterEnv": [
+      "<rootDir>/src/__tests__/setup.js"
+    ],
     "transformIgnorePatterns": [
       "node_modules/(?!(uuid)/)"
     ]
@@ -47,6 +54,7 @@
     "qrcode": "^1.5.4",
     "resend": "^4.0.0",
     "sharp": "^0.34.5",
+    "square": "^44.0.1",
     "uuid": "^13.0.0",
     "winston": "^3.19.0"
   },

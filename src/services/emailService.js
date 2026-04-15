@@ -731,6 +731,26 @@ const templates = {
       </html>
     `,
   }),
+
+  // Support ticket notification — sent to admin when a user submits a ticket
+  supportTicketNotification: (_, data) => ({
+    subject: `[IDDI Support] #${data.ticketId}: ${data.subject}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head><meta charset="utf-8"></head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #4F46E5;">New Support Ticket #${data.ticketId}</h2>
+        <p><strong>From:</strong> ${data.userName} (${data.userEmail})</p>
+        <p><strong>Subject:</strong> ${data.subject}</p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">
+        <p>${(data.message || '').replace(/\n/g, '<br>')}</p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">
+        <p style="color: #6b7280; font-size: 13px;">Reply to the customer at ${data.userEmail}</p>
+      </body>
+      </html>
+    `,
+  }),
 };
 
 // Send email function
@@ -761,6 +781,8 @@ async function sendEmail(to, templateName, templateData = {}) {
       emailContent = template(templateData.userName || 'there', templateData.stats || {});
     } else if (templateName === 'weeklyDigest') {
       emailContent = template(templateData.userName || 'there', templateData.stats || {});
+    } else if (templateName === 'supportTicketNotification') {
+      emailContent = template(null, templateData);
     } else {
       emailContent = template(templateData.userName || 'there');
     }
