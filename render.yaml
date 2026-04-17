@@ -2,6 +2,7 @@ services:
   - type: web
     name: iddi-backend
     runtime: node
+    plan: standard
     buildCommand: npm install
     startCommand: npm start
     envVars:

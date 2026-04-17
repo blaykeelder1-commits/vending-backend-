@@ -67,6 +67,15 @@ async function startServer() {
       dbConnected
     });
   });
+
+  // Warm Google JWKS cache so the first real verifyIdToken isn't cold.
+  if (process.env.GOOGLE_CLIENT_ID) {
+    try {
+      const { OAuth2Client } = require('google-auth-library');
+      const warm = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+      warm.getFederatedSignonCertsAsync().catch(() => {});
+    } catch (_) { /* ignore */ }
+  }
 }
 
 // Hourly maintenance tasks with concurrency guard
