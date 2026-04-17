@@ -138,9 +138,10 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Check if origin matches allowed list or is a Vercel preview URL for this project
+    // Check if origin matches allowed list or is a Vercel preview URL for this project.
+    // Vercel project name is "my-react-app"; "vending-front-end" is a legacy alias.
     const isAllowed = allowedOrigins.includes(origin) ||
-      (origin.endsWith('.vercel.app') && origin.includes('vending-front-end'));
+      (origin.endsWith('.vercel.app') && (origin.includes('my-react-app') || origin.includes('vending-front-end')));
 
     if (isAllowed) {
       callback(null, true);
