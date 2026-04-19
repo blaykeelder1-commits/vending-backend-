@@ -751,6 +751,64 @@ const templates = {
       </html>
     `,
   }),
+
+  shoppingList: (userName, data) => {
+    const products = Array.isArray(data.products) ? data.products : [];
+    const windowDays = data.windowDays || 90;
+    const date = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const rows = products.map((p, i) => `
+      <tr>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #E5E7EB; font-weight: 600; width: 28px; color: #6B7280;">${i + 1}</td>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #E5E7EB;">
+          <div style="font-weight: 600;">${p.product_name}</div>
+          ${p.category ? `<div style="font-size: 12px; color: #6B7280; margin-top: 2px;">${p.category}</div>` : ''}
+        </td>
+        <td style="padding: 10px 12px; border-bottom: 1px solid #E5E7EB; text-align: right; white-space: nowrap;">
+          <span style="font-weight: 700; color: #10B981;">${p.total_yes} good</span>
+          <span style="color: #6B7280; font-size: 12px;"> / ${p.total_no} bad</span>
+          <div style="font-size: 12px; color: #6B7280; margin-top: 2px;">${p.approval_rate}% approval • ${p.machine_count} machine${Number(p.machine_count) === 1 ? '' : 's'}</div>
+        </td>
+      </tr>
+    `).join('');
+
+    const plainLines = products.map((p, i) =>
+      `${i + 1}. ${p.product_name} — ${p.total_yes} good / ${p.total_no} bad (${p.approval_rate}%), ${p.machine_count} machine${Number(p.machine_count) === 1 ? '' : 's'}`
+    ).join('\n');
+
+    return {
+      subject: `Your IDDI Shopping List — ${date} (${products.length} item${products.length === 1 ? '' : 's'})`,
+      html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; background: #F9FAFB; margin: 0; padding: 20px;">
+        <div style="max-width: 640px; margin: 0 auto;">
+          <div style="background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color: white; padding: 24px; border-radius: 8px 8px 0 0;">
+            <h2 style="margin: 0 0 4px;">IDDI Shopping List</h2>
+            <p style="margin: 0; opacity: 0.9; font-size: 14px;">${date} • based on performance over the last ${windowDays} days</p>
+          </div>
+          <div style="background: #fff; padding: 24px; border: 1px solid #E5E7EB; border-top: none;">
+            <p style="margin: 0 0 16px;">Hi ${userName},</p>
+            <p style="margin: 0 0 16px;">Here are the products performing well enough to restock — sorted by approval rate:</p>
+            <table style="width: 100%; border-collapse: collapse; margin: 8px 0 20px;">
+              ${rows || '<tr><td style="padding: 16px; color: #6B7280;">No qualifying products yet.</td></tr>'}
+            </table>
+            <p style="margin: 16px 0 0; font-size: 13px; color: #6B7280;">Plain text (easy to copy into notes):</p>
+            <pre style="background: #F3F4F6; padding: 12px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; color: #111; margin: 8px 0 0;">${plainLines || 'No qualifying products yet.'}</pre>
+            <div style="margin-top: 24px; text-align: center;">
+              <a href="${FRONTEND_URL}/vendor/poll-summary" style="display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Open Shopping List in IDDI</a>
+            </div>
+          </div>
+          <div style="text-align: center; padding: 16px; color: #6B7280; font-size: 13px;">IDDI • Smarter vending, fewer guesses</div>
+        </div>
+      </body>
+      </html>
+      `,
+    };
+  },
 };
 
 // Send email function
@@ -783,6 +841,8 @@ async function sendEmail(to, templateName, templateData = {}) {
       emailContent = template(templateData.userName || 'there', templateData.stats || {});
     } else if (templateName === 'supportTicketNotification') {
       emailContent = template(null, templateData);
+    } else if (templateName === 'shoppingList') {
+      emailContent = template(templateData.userName || 'there', templateData);
     } else {
       emailContent = template(templateData.userName || 'there');
     }

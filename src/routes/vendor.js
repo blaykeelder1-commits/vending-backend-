@@ -1273,10 +1273,17 @@ router.put('/machines/:machineId/inventory/:id/performance', async (req, res) =>
       [isPerforming, id, machineId]
     );
 
-    // Log the performance change
+    // Log the performance change — skip if an identical mark was logged in the last 5 minutes
+    // (prevents accidental double-taps from inflating shopping-list counts).
     await query(
       `INSERT INTO product_performance_log (machine_product_id, is_performing, marked_by, notes)
-       VALUES ($1, $2, $3, $4)`,
+       SELECT $1, $2, $3, $4
+       WHERE NOT EXISTS (
+         SELECT 1 FROM product_performance_log
+         WHERE machine_product_id = $1
+           AND is_performing = $2
+           AND created_at > NOW() - INTERVAL '5 minutes'
+       )`,
       [id, isPerforming, req.user.id, notes || null]
     );
 
@@ -1366,14 +1373,23 @@ router.post('/machines/:machineId/performance-commit', async (req, res) => {
         inventoryMap[row.id] = row;
       }
 
-      // Process each mark: log to performance_log, then reset is_performing to NULL
+      // Process each mark: log to performance_log, then reset is_performing to NULL.
+      // Skip the log row if the same value was logged in the last 5 minutes — prevents
+      // double-tap / replay duplicates from inflating shopping-list counts.
       for (const mark of marks) {
+        // eslint-disable-next-line no-unused-vars
         const item = inventoryMap[mark.inventoryId];
 
-        // Insert into performance log
+        // Insert into performance log (dedup 5-min window)
         await client.query(
           `INSERT INTO product_performance_log (machine_product_id, is_performing, marked_by)
-           VALUES ($1, $2, $3)`,
+           SELECT $1, $2, $3
+           WHERE NOT EXISTS (
+             SELECT 1 FROM product_performance_log
+             WHERE machine_product_id = $1
+               AND is_performing = $2
+               AND created_at > NOW() - INTERVAL '5 minutes'
+           )`,
           [mark.inventoryId, mark.isPerforming, req.user.id]
         );
 
@@ -2142,14 +2158,22 @@ router.get('/poll-summary', async (req, res) => {
 
 /**
  * GET /api/vendor/shopping-list
- * Products performing well across all machines, based on vendor performance marks
+ * Products performing well across all machines, based on vendor performance marks.
+ * Ranks by approval rate first, then volume. Filters to the last N days (default 90)
+ * and to marks created AFTER the vendor's last reset (perf_reset_at).
  */
 router.get('/shopping-list', async (req, res) => {
   try {
     const vendorId = req.user.id;
 
+    const windowDays = Math.min(Math.max(parseInt(req.query.window, 10) || 90, 1), 730);
+    const minApproval = Math.min(Math.max(parseInt(req.query.minApproval, 10) || 50, 0), 100);
+
     const result = await query(
-      `SELECT
+      `WITH reset AS (
+         SELECT perf_reset_at FROM users WHERE id = $1
+       )
+       SELECT
          p.product_name,
          p.category,
          COUNT(*) FILTER (WHERE ppl.is_performing = true) as total_yes,
@@ -2163,13 +2187,23 @@ router.get('/shopping-list', async (req, res) => {
        JOIN machine_products mp ON ppl.machine_product_id = mp.id
        JOIN products p ON mp.product_id = p.id
        JOIN vending_machines vm ON mp.machine_id = vm.id
+       CROSS JOIN reset
        WHERE vm.vendor_id = $1
          AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+         AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
+         AND ppl.created_at > NOW() - ($2::int * INTERVAL '1 day')
+         AND (reset.perf_reset_at IS NULL OR ppl.created_at > reset.perf_reset_at)
        GROUP BY p.id, p.product_name, p.category
-       HAVING COUNT(*) >= 5 AND COUNT(*) FILTER (WHERE ppl.is_performing = true) >= 1
-       ORDER BY COUNT(*) FILTER (WHERE ppl.is_performing = true) DESC,
-                ROUND(COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)) DESC`,
-      [vendorId]
+       HAVING COUNT(*) >= 5
+          AND COUNT(*) FILTER (WHERE ppl.is_performing = true) >= 1
+          AND ROUND(
+                COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)
+              ) >= $3
+       ORDER BY ROUND(
+                  COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)
+                ) DESC,
+                COUNT(*) FILTER (WHERE ppl.is_performing = true) DESC`,
+      [vendorId, windowDays, minApproval]
     );
 
     res.json({
@@ -2177,6 +2211,8 @@ router.get('/shopping-list', async (req, res) => {
       data: {
         products: result.rows,
         count: result.rows.length,
+        windowDays,
+        minApproval,
       },
     });
   } catch (error) {
@@ -2184,6 +2220,203 @@ router.get('/shopping-list', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching shopping list',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/shopping-list/reset
+ * Marks the current time as the vendor's perf history cutoff. Shopping list
+ * aggregations only include marks AFTER this timestamp.
+ * Also clears machine_products.is_performing so the dashboard reflects the fresh state.
+ * Returns the previous reset timestamp (if any) so undo can restore it.
+ */
+router.post('/shopping-list/reset', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const result = await transaction(async (client) => {
+      const prev = await client.query(
+        'SELECT perf_reset_at FROM users WHERE id = $1',
+        [vendorId]
+      );
+
+      const update = await client.query(
+        `UPDATE users SET perf_reset_at = NOW() WHERE id = $1 RETURNING perf_reset_at`,
+        [vendorId]
+      );
+
+      await client.query(
+        `UPDATE machine_products
+         SET is_performing = NULL, performance_marked_at = NULL
+         WHERE machine_id IN (SELECT id FROM vending_machines WHERE vendor_id = $1)`,
+        [vendorId]
+      );
+
+      return {
+        resetAt: update.rows[0].perf_reset_at,
+        previousResetAt: prev.rows[0]?.perf_reset_at || null,
+      };
+    });
+
+    res.json({
+      success: true,
+      message: 'Shopping list reset. You can undo this within 10 minutes.',
+      data: result,
+    });
+  } catch (error) {
+    logger.error('Error resetting shopping list', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error resetting shopping list',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/shopping-list/undo-reset
+ * Reverts a reset if called within 10 minutes. Restores the previous reset timestamp
+ * (or clears it if no prior reset existed).
+ */
+router.post('/shopping-list/undo-reset', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const schema = Joi.object({
+      previousResetAt: Joi.date().iso().allow(null).optional(),
+    });
+    const { error, value } = schema.validate(req.body || {});
+    if (error) {
+      return res.status(400).json({ success: false, message: error.details[0].message });
+    }
+
+    const current = await query('SELECT perf_reset_at FROM users WHERE id = $1', [vendorId]);
+    const currentReset = current.rows[0]?.perf_reset_at;
+
+    if (!currentReset) {
+      return res.status(400).json({
+        success: false,
+        message: 'No reset to undo',
+      });
+    }
+
+    const ageMs = Date.now() - new Date(currentReset).getTime();
+    if (ageMs > 10 * 60 * 1000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Undo window (10 minutes) has expired',
+      });
+    }
+
+    await query(
+      'UPDATE users SET perf_reset_at = $1 WHERE id = $2',
+      [value.previousResetAt || null, vendorId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Reset undone. Your previous performance history is restored.',
+    });
+  } catch (error) {
+    logger.error('Error undoing shopping list reset', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error undoing reset',
+    });
+  }
+});
+
+/**
+ * POST /api/vendor/shopping-list/email
+ * Emails the current shopping list to the logged-in vendor's email address.
+ */
+router.post('/shopping-list/email', async (req, res) => {
+  try {
+    const vendorId = req.user.id;
+
+    const userRow = await query(
+      'SELECT email, full_name FROM users WHERE id = $1',
+      [vendorId]
+    );
+
+    if (userRow.rows.length === 0 || !userRow.rows[0].email) {
+      return res.status(400).json({
+        success: false,
+        message: 'No email on file for this account',
+      });
+    }
+
+    const windowDays = Math.min(Math.max(parseInt(req.query.window, 10) || 90, 1), 730);
+    const minApproval = Math.min(Math.max(parseInt(req.query.minApproval, 10) || 50, 0), 100);
+
+    const listResult = await query(
+      `WITH reset AS (
+         SELECT perf_reset_at FROM users WHERE id = $1
+       )
+       SELECT
+         p.product_name,
+         p.category,
+         COUNT(*) FILTER (WHERE ppl.is_performing = true) as total_yes,
+         COUNT(*) FILTER (WHERE ppl.is_performing = false) as total_no,
+         COUNT(DISTINCT mp.machine_id) as machine_count,
+         ROUND(
+           COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)
+         ) as approval_rate
+       FROM product_performance_log ppl
+       JOIN machine_products mp ON ppl.machine_product_id = mp.id
+       JOIN products p ON mp.product_id = p.id
+       JOIN vending_machines vm ON mp.machine_id = vm.id
+       CROSS JOIN reset
+       WHERE vm.vendor_id = $1
+         AND (mp.is_deleted = false OR mp.is_deleted IS NULL)
+         AND (vm.is_deleted = false OR vm.is_deleted IS NULL)
+         AND ppl.created_at > NOW() - ($2::int * INTERVAL '1 day')
+         AND (reset.perf_reset_at IS NULL OR ppl.created_at > reset.perf_reset_at)
+       GROUP BY p.id, p.product_name, p.category
+       HAVING COUNT(*) >= 5
+          AND COUNT(*) FILTER (WHERE ppl.is_performing = true) >= 1
+          AND ROUND(
+                COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)
+              ) >= $3
+       ORDER BY ROUND(
+                  COUNT(*) FILTER (WHERE ppl.is_performing = true) * 100.0 / NULLIF(COUNT(*), 0)
+                ) DESC,
+                COUNT(*) FILTER (WHERE ppl.is_performing = true) DESC`,
+      [vendorId, windowDays, minApproval]
+    );
+
+    if (listResult.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No products on the shopping list yet — keep marking products to build one',
+      });
+    }
+
+    const { sendEmail } = require('../services/emailService');
+    const emailResult = await sendEmail(userRow.rows[0].email, 'shoppingList', {
+      userName: userRow.rows[0].full_name || 'there',
+      products: listResult.rows,
+      windowDays,
+    });
+
+    if (!emailResult.success) {
+      logger.error('Shopping list email failed', { error: emailResult.error });
+      return res.status(502).json({
+        success: false,
+        message: 'Email provider failed to send',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Shopping list sent to ${userRow.rows[0].email}`,
+      data: { sentTo: userRow.rows[0].email, itemCount: listResult.rows.length },
+    });
+  } catch (error) {
+    logger.error('Error emailing shopping list', { error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error emailing shopping list',
     });
   }
 });

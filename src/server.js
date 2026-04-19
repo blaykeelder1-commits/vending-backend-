@@ -200,6 +200,14 @@ async function gracefulShutdown(signal) {
   }, SHUTDOWN_TIMEOUT);
   forceExit.unref();
 
+  // Flush any buffered analytics events before closing the pool (prevents event loss on deploys)
+  try {
+    await analyticsService.flushEventBuffer();
+    logger.info('Analytics event buffer flushed');
+  } catch (err) {
+    logger.error('Error flushing analytics buffer on shutdown', { error: err.message });
+  }
+
   // Drain DB pool
   try {
     await pool.end();

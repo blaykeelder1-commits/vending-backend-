@@ -132,13 +132,15 @@ router.post('/init-session', async (req, res) => {
 
     // 4. Load or auto-generate poll
     if (!poll) {
-      // Auto-generate poll from machine products
+      // Auto-generate poll from machine products.
+      // Only surface products explicitly marked as underperforming — NULL (never marked)
+      // means the vendor hasn't evaluated them yet, so we shouldn't offer them up for replacement.
       const underperformersResult = await query(
         `SELECT mp.id as machine_product_id, mp.product_id, p.product_name, p.image_url
          FROM machine_products mp
          JOIN products p ON mp.product_id = p.id
-         WHERE mp.machine_id = $1 AND (mp.is_performing = false OR mp.is_performing IS NULL) AND p.is_active = true
-         ORDER BY mp.is_performing ASC NULLS LAST, p.product_name LIMIT 20`,
+         WHERE mp.machine_id = $1 AND mp.is_performing = false AND p.is_active = true
+         ORDER BY p.product_name LIMIT 20`,
         [machineId]
       );
 
@@ -523,16 +525,17 @@ router.get('/polls', verifySession, async (req, res) => {
 
       const machine = machineInfo.rows[0];
 
-      // Get underperforming products (is_performing = false OR is_performing IS NULL)
+      // Get underperforming products (explicitly marked as not performing).
+      // NULL means the vendor hasn't evaluated yet — don't offer those up for replacement.
       const underperformersResult = await query(
         `SELECT mp.id as machine_product_id, mp.product_id,
                 p.product_name, p.image_url
          FROM machine_products mp
          JOIN products p ON mp.product_id = p.id
          WHERE mp.machine_id = $1
-           AND (mp.is_performing = false OR mp.is_performing IS NULL)
+           AND mp.is_performing = false
            AND p.is_active = true
-         ORDER BY mp.is_performing ASC NULLS LAST, p.product_name
+         ORDER BY p.product_name
          LIMIT 20`,
         [machineId]
       );
