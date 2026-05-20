@@ -127,6 +127,9 @@ const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       'http://localhost:3000',
+      'https://vending-front-end.pages.dev',
+      'https://iddi.app',
+      'https://www.iddi.app',
       process.env.FRONTEND_URL,
     ].filter(Boolean);
 
@@ -138,9 +141,9 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Check if origin matches allowed list or is a Vercel preview URL for this project.
-    // Vercel project name is "my-react-app"; "vending-front-end" is a legacy alias.
+    // Allow project-scoped preview URLs on CF Pages (and legacy Vercel previews).
     const isAllowed = allowedOrigins.includes(origin) ||
+      (origin.endsWith('.pages.dev') && origin.includes('vending-front-end')) ||
       (origin.endsWith('.vercel.app') && (origin.includes('my-react-app') || origin.includes('vending-front-end')));
 
     if (isAllowed) {
