@@ -128,8 +128,8 @@ const corsOptions = {
     const allowedOrigins = [
       'http://localhost:3000',
       'https://vending-front-end.pages.dev',
-      'https://iddi.app',
-      'https://www.iddi.app',
+      'https://iddisolutions.net',
+      'https://www.iddisolutions.net',
       process.env.FRONTEND_URL,
     ].filter(Boolean);
 
