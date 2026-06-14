@@ -4271,7 +4271,7 @@ router.post('/reports/share', async (req, res) => {
       [vendorId, token, JSON.stringify(reportData), expiresAt]
     );
 
-    const frontendUrl = process.env.FRONTEND_URL || 'https://vending-front-end.vercel.app';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://iddisolutions.net';
 
     res.status(201).json({
       success: true,

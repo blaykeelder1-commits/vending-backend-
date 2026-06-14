@@ -15,7 +15,7 @@ const IS_SANDBOX = !process.env.RESEND_FROM_EMAIL || FROM_EMAIL.includes('resend
 if (IS_SANDBOX) {
   console.warn('[Email] WARNING: Using Resend sandbox mode. Emails only deliver to account owner. Set RESEND_FROM_EMAIL to a verified domain.');
 }
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vending-front-end.vercel.app';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://iddisolutions.net';
 
 // Email Templates
 const templates = {
