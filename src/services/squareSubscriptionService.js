@@ -29,7 +29,7 @@ const TIER_CONFIG = {
   business: { machineLimit: 100, price: 9900, planVariationId: process.env.SQUARE_BUSINESS_PLAN_ID },
 };
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vending-front-end.vercel.app';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://iddisolutions.net';
 
 /**
  * Create a Square Checkout link for a subscription plan variation.
@@ -229,10 +229,10 @@ async function handleWebhook(event) {
 
     // Handle trial tracking
     if (subscription.start_date && !subscription.charged_through_date) {
-      // In trial period — calculate trial_end as start + 14 days
+      // In trial period — calculate trial_end as start + 7 days
       const trialStart = new Date(subscription.start_date);
       const trialEnd = new Date(trialStart);
-      trialEnd.setDate(trialEnd.getDate() + 14);
+      trialEnd.setDate(trialEnd.getDate() + 7);
       await query(
         `UPDATE users SET trial_start = $1, trial_end = $2 WHERE id = $3`,
         [trialStart, trialEnd, user.id]
