@@ -7,8 +7,9 @@
 // Without --apply everything runs inside a transaction that is ROLLED BACK (dry run).
 // Imports per product: SKU + full capacity (sales tab), unit cost + supplier (costs tab),
 // and the blacklist (both tabs, deduped, earliest date wins).
-// Never guessed: a sheet row matches an IDDI product only by exact normalized name, or by a
-// UNIQUE word-subset match. Everything else is listed in the report for a human to resolve.
+// Never guessed: only an EXACT normalized-name match applies automatically. Word-subset
+// matches are written to a suggestions CSV (--suggest out.csv); a human deletes wrong lines
+// and passes the file back with --map. Everything else is listed in the report.
 // Weekly sales history is NOT imported (the sheet's weeks are undated).
 require('dotenv').config();
 const fs = require('fs');
@@ -46,9 +47,12 @@ const money = (s) => { const n = parseFloat(String(s || '').replace(/[$,]/g, '')
 const int = (s) => { const n = parseInt(String(s || '').trim(), 10); return Number.isFinite(n) ? n : null; };
 const date = (s) => { const d = new Date(String(s || '').trim()); return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10); };
 
-function matcher(products) {
+function matcher(products, map) {
   const byNorm = new Map(products.map((p) => [norm(p.product_name), p]));
+  const byId = new Map(products.map((p) => [p.id, p]));
   return (sheetName) => {
+    const mapped = map.get(norm(sheetName));
+    if (mapped && byId.has(mapped)) return { product: byId.get(mapped), how: 'mapped' };
     const exact = byNorm.get(norm(sheetName));
     if (exact) return { product: exact, how: 'exact' };
     const st = new Set(tokens(sheetName));
@@ -61,7 +65,7 @@ function matcher(products) {
       const sup = [...st].every((w) => pt.includes(w));
       return sub || sup;
     });
-    if (hits.length === 1) return { product: hits[0], how: 'subset' };
+    if (hits.length === 1) return { product: null, how: 'suggested', suggestion: hits[0] };
     return { product: null, how: hits.length ? 'ambiguous' : 'none', candidates: hits.map((h) => h.product_name) };
   };
 }
@@ -111,34 +115,62 @@ function readStockBlacklist(rows) {
   const sales = readSales(parseCsv(fs.readFileSync(args.sales, 'utf8')));
   const costs = readCosts(parseCsv(fs.readFileSync(args.costs, 'utf8')));
   const stockBl = readStockBlacklist(parseCsv(fs.readFileSync(args.stock, 'utf8')));
+  // --map: CSV of "sheet name,iddi product id" lines a human has confirmed
+  const map = new Map();
+  if (typeof args.map === 'string') {
+    for (const r of parseCsv(fs.readFileSync(args.map, 'utf8')).slice(1)) {
+      const id = parseInt(r[1], 10);
+      if (r[0] && id) map.set(norm(r[0]), id);
+    }
+  }
 
   const c = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
   await c.connect();
   await c.query('BEGIN');
-  const report = { matched: [], unmatched: [], ambiguous: [], priceDiffs: [], blacklist: 0, blacklistSkipped: 0 };
+  const report = { matched: [], unmatched: [], ambiguous: [], suggested: [], priceDiffs: [], blacklist: 0, blacklistSkipped: 0 };
+  const suggestions = new Map(); // sheet name -> product
   try {
     const { rows: products } = await c.query(
       'SELECT id, product_name, price FROM products WHERE vendor_id = $1 AND is_deleted IS NOT TRUE', [vendorId]);
-    const match = matcher(products);
+    const match = matcher(products, map);
     const updates = new Map(); // product id -> fields
 
     const note = (src, sheetName, m) => {
       if (m.product) report.matched.push(`${src}: "${sheetName}" → "${m.product.product_name}" (${m.how})`);
+      else if (m.how === 'suggested') {
+        report.suggested.push(`${src}: "${sheetName}" → "${m.suggestion.product_name}"?`);
+        suggestions.set(sheetName, m.suggestion);
+      }
       else if (m.how === 'ambiguous') report.ambiguous.push(`${src}: "${sheetName}" → ${m.candidates.join(' | ')}`);
       else report.unmatched.push(`${src}: "${sheetName}"`);
     };
 
-    for (const s of sales.rows) {
-      const m = match(s.name); note('sales', s.name, m);
-      if (!m.product) continue;
+    // Collision guard: one IDDI product fed by two different rows of the same tab → apply neither.
+    const sources = new Map(); // `${tab}:${productId}` -> Set(sheet names)
+    const claim = (tab, name, m) => {
+      const k = `${tab}:${m.product.id}`;
+      sources.set(k, (sources.get(k) || new Set()).add(norm(name)));
+    };
+    const clean = (tab, m) => sources.get(`${tab}:${m.product.id}`).size === 1;
+    const salesMatches = sales.rows.map((s) => ({ s, m: match(s.name) }));
+    const costMatches = costs.map((k) => ({ k, m: match(k.name) }));
+    salesMatches.forEach(({ s, m }) => m.product && claim('sales', s.name, m));
+    costMatches.forEach(({ k, m }) => m.product && claim('costs', k.name, m));
+    for (const [key, names] of sources) {
+      if (names.size > 1) report.ambiguous.push(`${key.split(':')[0]}: several rows → one IDDI product (#${key.split(':')[1]}): ${[...names].join(' | ')}`);
+    }
+
+    for (const { s, m } of salesMatches) {
+      note('sales', s.name, m);
+      if (!m.product || !clean('sales', m)) continue;
       const u = updates.get(m.product.id) || {};
       if (s.sku) u.sku = s.sku;
       if (s.capacity != null) u.full_capacity = s.capacity;
       updates.set(m.product.id, u);
     }
-    for (const k of costs) {
-      const m = match(k.name); note('costs', k.name, m);
-      if (!m.product) continue;
+    for (const { k, m } of costMatches) {
+      note('costs', k.name, m);
+      if (!m.product || !clean('costs', m)) continue;
       const u = updates.get(m.product.id) || {};
       if (k.unitCost != null) u.unit_cost = k.unitCost;
       if (k.supplier) u.supplier = k.supplier;
@@ -176,6 +208,7 @@ function readStockBlacklist(rows) {
       if (r.rowCount) report.blacklist++; else report.blacklistSkipped++;
     }
 
+    // One IDDI product must not receive values from two different sheet rows
     report.productsUpdated = [...updates.values()].filter((u) => Object.keys(u).length).length;
     report.iddiProducts = products.length;
   } finally {
@@ -188,12 +221,19 @@ function readStockBlacklist(rows) {
     '',
     `- IDDI products: ${report.iddiProducts}; products updated: ${report.productsUpdated}`,
     `- Blacklist entries added: ${report.blacklist} (already present: ${report.blacklistSkipped})`,
-    `- Matched rows: ${report.matched.length}; ambiguous: ${report.ambiguous.length}; unmatched: ${report.unmatched.length}`,
+    `- Applied rows: ${report.matched.length}; suggested (not applied): ${report.suggested.length}; ambiguous: ${report.ambiguous.length}; unmatched: ${report.unmatched.length}`,
+    '', '## Suggested (NOT applied — confirm via the --suggest CSV, then --map)', ...report.suggested.map((x) => `- ${x}`),
     '', '## Ambiguous (resolve by hand)', ...report.ambiguous.map((x) => `- ${x}`),
     '', '## Unmatched (no IDDI product with this name)', ...report.unmatched.map((x) => `- ${x}`),
     '', '## Retail price differences (IDDI price left unchanged)', ...report.priceDiffs.map((x) => `- ${x}`),
     '', '## Matches', ...report.matched.map((x) => `- ${x}`),
   ].join('\n');
   if (args.report) fs.writeFileSync(args.report, md);
+  if (typeof args.suggest === 'string') {
+    const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const lines = ['sheet_name,iddi_product_id,iddi_product_name'];
+    for (const [name, p] of suggestions) lines.push([esc(name), p.id, esc(p.product_name)].join(','));
+    fs.writeFileSync(args.suggest, `${lines.join('\n')}\n`);
+  }
   console.log(md.split('\n').slice(0, 6).join('\n'));
 })().catch((e) => { console.error('FAILED:', e.message); process.exit(1); });

@@ -135,6 +135,10 @@ const corsOptions = {
   credentials: true,
   optionsSuccessStatus: 200,
 };
+// Read-only integration API (Muse, Sheets mirror): API-key auth, GET only. Mounted before
+// CORS because server-to-server callers send no Origin; keys never grant browser access to cookies.
+app.use('/api/v1', require('./routes/v1'));
+
 app.use(cors(corsOptions));
 
 // =============================================================================
@@ -448,6 +452,7 @@ const authRouter = require('./routes/auth');
 app.use('/api/auth', authRouter);
 app.use('/api/public', publicLimiter, require('./routes/public'));
 app.use('/api/vendor/sheet', require('./routes/sheet'));
+app.use('/api/vendor/api-keys', require('./routes/apiKeys'));
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
