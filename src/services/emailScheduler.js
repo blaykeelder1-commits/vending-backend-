@@ -49,7 +49,7 @@ async function processScheduledEmails() {
         if (email.template_name === 'onboardingDay10') {
           try {
             const machineCount = await query(
-              `SELECT COUNT(*) as count FROM machines WHERE vendor_id = $1`,
+              `SELECT COUNT(*) as count FROM vending_machines WHERE vendor_id = $1 AND is_deleted IS NOT TRUE`,
               [email.user_id]
             );
             const count = parseInt(machineCount.rows[0].count) || 1;
@@ -219,8 +219,8 @@ async function scheduleSpoilageAlerts() {
     const vendorsResult = await query(`
       SELECT DISTINCT u.id, u.email, u.full_name
       FROM users u
-      JOIN machines m ON m.vendor_id = u.id
-      JOIN machine_inventory mi ON mi.machine_id = m.id
+      JOIN vending_machines m ON m.vendor_id = u.id AND m.is_deleted IS NOT TRUE
+      JOIN machine_products mi ON mi.machine_id = m.id AND mi.is_deleted IS NOT TRUE
       WHERE u.role = 'vendor'
         AND u.email_verified = true
         AND mi.current_stock > 0
@@ -249,10 +249,11 @@ async function scheduleSpoilageAlerts() {
             mi.current_stock,
             mi.expiration_date,
             CEIL(EXTRACT(EPOCH FROM (mi.expiration_date - NOW())) / 86400) as days_until_expiry
-          FROM machine_inventory mi
-          JOIN machines m ON mi.machine_id = m.id
+          FROM machine_products mi
+          JOIN vending_machines m ON mi.machine_id = m.id AND m.is_deleted IS NOT TRUE
           JOIN products p ON mi.product_id = p.id
           WHERE m.vendor_id = $1
+            AND mi.is_deleted IS NOT TRUE
             AND mi.current_stock > 0
             AND mi.expiration_date IS NOT NULL
             AND mi.expiration_date <= NOW() + INTERVAL '1 day' * ${Number(RULES.expiry.warningDays)}
@@ -286,6 +287,7 @@ async function scheduleSpoilageAlerts() {
         // Send directly (time-sensitive)
         const sendResult = await sendEmail(vendor.email, 'spoilageAlert', {
           userName: vendor.full_name || 'there',
+          windowDays: RULES.expiry.warningDays,
           ...alertData,
         });
 
@@ -422,7 +424,63 @@ async function runSchedulerTasks() {
   }
 }
 
+/**
+ * Trial-ending reminder: one email per trial, sent when the trial ends within
+ * RULES.trialReminderDays. Keeps the pricing-page promise "we'll remind you before it ends".
+ */
+const formatMachinesText = (n) => (n === 1 ? '1 machine' : `up to ${n} machines`);
+
+async function sendTrialEndingReminders() {
+  const { PLANS, DEFAULT_TIER } = require('../config/plans');
+  const results = { checked: 0, sent: 0, errors: [] };
+  const vendors = await query(`
+    SELECT u.id, u.email, u.full_name, u.subscription_tier, u.trial_end
+    FROM users u
+    WHERE u.role = 'vendor'
+      AND u.email_verified = true
+      AND u.subscription_tier <> $1
+      AND u.trial_end IS NOT NULL
+      AND u.trial_end > NOW()
+      AND u.trial_end <= NOW() + INTERVAL '1 day' * ${Number(RULES.trialReminderDays)}
+      AND NOT EXISTS (
+        SELECT 1 FROM email_log el
+        WHERE el.user_id = u.id AND el.template_name = 'trialEnding'
+          AND el.status = 'sent' AND el.created_at > u.trial_end - INTERVAL '30 days'
+      )
+    LIMIT 200
+  `, [DEFAULT_TIER]);
+  results.checked = vendors.rows.length;
+  for (const v of vendors.rows) {
+    try {
+      const plan = PLANS[v.subscription_tier];
+      if (!plan) continue;
+      const end = new Date(v.trial_end);
+      const days = Math.max(0, Math.ceil((end - Date.now()) / 86400000));
+      const sendResult = await sendEmail(v.email, 'trialEnding', {
+        userName: v.full_name || 'there',
+        planName: plan.name,
+        whenText: days <= 1 ? 'tomorrow' : `in ${days} days`,
+        endDate: end.toDateString(),
+        priceText: `$${Math.round(plan.priceCents / 100)}`,
+        freeMachines: formatMachinesText(PLANS[DEFAULT_TIER].machineLimit),
+      });
+      await query(
+        `INSERT INTO email_log (user_id, email, template_name, subject, status, external_id, error_message)
+         VALUES ($1, $2, 'trialEnding', 'Trial ending', $3, $4, $5)`,
+        [v.id, v.email, sendResult.success ? 'sent' : 'failed', sendResult.id || null, sendResult.success ? null : sendResult.error]
+      );
+      if (sendResult.success) results.sent++;
+      else results.errors.push({ vendorId: v.id, error: sendResult.error });
+    } catch (error) {
+      results.errors.push({ vendorId: v.id, error: error.message });
+      logger.error('Trial reminder error', { vendorId: v.id, error: error.message });
+    }
+  }
+  return results;
+}
+
 module.exports = {
+  sendTrialEndingReminders,
   processScheduledEmails,
   processOnboardingEmails,
   scheduleReEngagementEmails,

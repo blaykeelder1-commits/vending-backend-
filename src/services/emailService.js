@@ -662,6 +662,23 @@ const templates = {
   }),
 
   // Spoilage alert - automated notification for expiring products
+  trialEnding: (userName, data) => ({
+    subject: `Your ${data.planName} trial ends ${data.whenText}`,
+    html: `
+      <!DOCTYPE html>
+      <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 560px; margin: 0 auto; padding: 24px;">
+          <p>Hi ${userName},</p>
+          <p>Your IDDI <strong>${data.planName}</strong> free trial ends <strong>${data.whenText}</strong> (${data.endDate}).</p>
+          <p>To keep your plan, do nothing — you'll be billed ${data.priceText}/month. Not ready? Cancel before then from your account and you won't be charged; you'll move to the Free plan (${data.freeMachines}).</p>
+          <p><a href="${FRONTEND_URL}/vendor/subscription" style="display: inline-block; background: #0c8a7e; color: #fff; padding: 12px 22px; border-radius: 6px; text-decoration: none;">Manage my plan</a></p>
+          <p style="color: #6b7280; font-size: 13px;">You're getting this because you started a trial on IDDI.</p>
+        </div>
+      </body></html>
+    `,
+  }),
+
   spoilageAlert: (userName, alertData) => ({
     subject: `Action Required: ${alertData.totalProducts} product(s) expiring soon`,
     html: `
@@ -689,7 +706,7 @@ const templates = {
         <div class="container">
           <div class="header">
             <h1 style="margin: 0;">Spoilage Alert</h1>
-            <p style="margin: 10px 0 0 0; opacity: 0.9;">${alertData.totalProducts} product(s) expiring within 7 days</p>
+            <p style="margin: 10px 0 0 0; opacity: 0.9;">${alertData.totalProducts} product(s) expiring within ${alertData.windowDays || 7} days</p>
           </div>
           <div class="content">
             <p>Hi ${userName},</p>
@@ -812,7 +829,19 @@ const templates = {
 };
 
 // Send email function
+// Seed/test accounts use these domains. Several are real companies' domains (vendor.com,
+// test.com, iddi.com) and iddivendor.com doesn't exist — never send to them.
+const TEST_EMAIL_DOMAINS = new Set(['example.com', 'example.org', 'test.com', 'vendor.com', 'iddi.com', 'iddivendor.com']);
+
+function isTestAddress(email) {
+  const domain = String(email || '').split('@')[1]?.toLowerCase().trim();
+  return !domain || TEST_EMAIL_DOMAINS.has(domain) || domain.endsWith('.test') || domain.endsWith('.invalid');
+}
+
 async function sendEmail(to, templateName, templateData = {}) {
+  if (isTestAddress(to)) {
+    return { success: false, error: 'skipped: test address' };
+  }
   if (!resend) {
     return { success: true, mock: true };
   }
@@ -833,6 +862,8 @@ async function sendEmail(to, templateName, templateData = {}) {
       emailContent = template(templateData.userName || 'there', templateData.leadMagnet);
     } else if (templateName === 'referralNotification') {
       emailContent = template(templateData.userName || 'there', templateData.referredName || 'Someone');
+    } else if (templateName === 'trialEnding') {
+      emailContent = template(templateData.userName || 'there', templateData);
     } else if (templateName === 'spoilageAlert') {
       emailContent = template(templateData.userName || 'there', templateData);
     } else if (templateName === 'onboardingDay5' || templateName === 'onboardingDay10') {
@@ -849,14 +880,19 @@ async function sendEmail(to, templateName, templateData = {}) {
 
     const { subject, html } = emailContent;
 
-    const result = await resend.emails.send({
+    // Resend v4 returns { data, error } and does NOT throw on API errors —
+    // treat an error as a failed send, never as success.
+    const { data, error } = await resend.emails.send({
       from: FROM_EMAIL,
       to: [to],
       subject,
       html,
     });
+    if (error) {
+      return { success: false, error: error.message || String(error) };
+    }
 
-    return { success: true, id: result.id };
+    return { success: true, id: data?.id };
   } catch (error) {
     return { success: false, error: error.message };
   }

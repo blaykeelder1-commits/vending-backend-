@@ -155,6 +155,15 @@ cron.schedule('0 0 * * *', async () => {
     } catch (error) {
       logger.error('Cron: Spoilage alert error', { error: error.message });
     }
+
+    // Trial-ending reminders (promised on the pricing page)
+    try {
+      const { sendTrialEndingReminders } = require('./services/emailScheduler');
+      const trialResult = await sendTrialEndingReminders();
+      logger.info('Cron: Trial reminders', trialResult);
+    } catch (error) {
+      logger.error('Cron: Trial reminder error', { error: error.message });
+    }
   } catch (error) {
     logger.error('Cron: Daily analytics aggregation error', { error: error.message });
     if (process.env.SENTRY_DSN) {

@@ -456,9 +456,12 @@ app.use('/api/vendor/api-keys', require('./routes/apiKeys'));
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
-app.use('/api/discounts/customer', customerLimiter);
-app.use('/api/discounts', authenticatedLimiter);
-app.use('/api', require('./routes/discounts'));
+// Rebates/discounts stay unmounted until payments exist (config/rules.js features.rebates)
+if (require('./config/rules').RULES.features.rebates) {
+  app.use('/api/discounts/customer', customerLimiter);
+  app.use('/api/discounts', authenticatedLimiter);
+  app.use('/api', require('./routes/discounts'));
+}
 app.use('/api/subscription', authenticatedLimiter, require('./routes/subscription'));
 
 // 404 handler

@@ -144,3 +144,10 @@ describe('Rate Limiting', () => {
     expect([200, 503]).toContain(response.status);
   });
 });
+
+describe('Rebates are switched off', () => {
+  it.each(['/api/discounts/balance', '/api/discounts/customer/history'])('%s → 404', async (path) => {
+    const res = await request(app).get(path).set('Origin', 'http://localhost:3000');
+    expect(res.status).toBe(404);
+  });
+});

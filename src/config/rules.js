@@ -41,6 +41,14 @@ const RULES = {
   // Discounts
   maxActiveDiscountsPerMachine: 3,
 
+  // Email a trial user this many days before the trial ends (once per trial)
+  trialReminderDays: 2,
+
+  // Features switched off until their plumbing exists
+  features: {
+    rebates: false, // discount/rebate system: no real money movement yet
+  },
+
   // Sessions and tokens
   customerSessionDays: 30,
   accessTokenTtl: process.env.JWT_EXPIRES_IN || '1h',
