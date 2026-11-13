@@ -555,6 +555,10 @@ router.put('/products/:id', async (req, res) => {
       imageUrl: Joi.string().uri().allow('').optional(),
       category: Joi.string().max(100).allow('').optional(),
       isActive: Joi.boolean().optional(),
+      sku: Joi.string().max(64).allow('', null).optional(),
+      unitCost: Joi.number().min(0).precision(2).allow(null).optional(),
+      supplier: Joi.string().max(120).allow('', null).optional(),
+      fullCapacity: Joi.number().integer().min(0).allow(null).optional(),
     });
 
     const { error, value } = schema.validate(req.body);
@@ -586,6 +590,14 @@ router.put('/products/:id', async (req, res) => {
     if (value.productName !== undefined) {
       updates.push(`product_name = $${paramCount++}`);
       values.push(value.productName);
+    }
+    // Sheet-parity fields (migration 045)
+    const extra = { sku: 'sku', unitCost: 'unit_cost', supplier: 'supplier', fullCapacity: 'full_capacity' };
+    for (const [key, col] of Object.entries(extra)) {
+      if (value[key] !== undefined) {
+        updates.push(`${col} = $${paramCount++}`);
+        values.push(value[key] === '' ? null : value[key]);
+      }
     }
     if (value.description !== undefined) {
       updates.push(`description = $${paramCount++}`);
@@ -907,6 +919,9 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     const { machineId, id } = req.params;
     const schema = Joi.object({
       stockQuantity: Joi.number().integer().min(0).optional(),
+      // Units left in the machine before this refill. When given, the units sold since the
+      // last count are logged before the refill — otherwise a restock hides the sales.
+      remaining: Joi.number().integer().min(0).optional(),
       sourceType: Joi.string().valid('warehouse', 'direct').default('warehouse'),
     });
 
@@ -929,7 +944,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
     }
 
     const vendorId = req.user.id;
-    const { stockQuantity, sourceType } = value;
+    const { stockQuantity, sourceType, remaining } = value;
 
     const result = await transaction(async (client) => {
       // Get current stock level and product_id
@@ -945,7 +960,20 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
 
       const currentStock = current.rows[0].current_stock;
       const productId = current.rows[0].product_id;
-      const delta = stockQuantity - currentStock;
+      // Log sales counted before the refill, then treat the count as the new baseline.
+      let baseline = currentStock;
+      if (remaining !== undefined && remaining < currentStock) {
+        const soldBeforeRefill = currentStock - remaining;
+        await client.query(
+          `INSERT INTO inventory_transactions
+           (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
+           VALUES ($1, $2, 'sold_from_machine', $3, $4, $5, $6, $7)`,
+          [vendorId, productId, -soldBeforeRefill, currentStock, remaining, machineId,
+           `Counted before refill: ${currentStock} -> ${remaining} (${soldBeforeRefill} sold)`]
+        );
+        baseline = remaining;
+      }
+      const delta = stockQuantity - baseline;
 
       // If stock is increasing, handle warehouse deduction
       if (delta > 0) {
@@ -974,7 +1002,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
               `INSERT INTO inventory_transactions
                (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
                VALUES ($1, $2, 'dispersal_to_machine', $3, $4, $5, $6, $7)`,
-              [vendorId, productId, -delta, centralStock, centralStock - delta, machineId, `Restocked machine: ${currentStock} -> ${stockQuantity}`]
+              [vendorId, productId, -delta, centralStock, centralStock - delta, machineId, `Restocked machine: ${baseline} -> ${stockQuantity}`]
             );
           }
         } else if (sourceType === 'direct') {
@@ -982,7 +1010,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
             `INSERT INTO inventory_transactions
              (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
              VALUES ($1, $2, 'direct_to_machine', $3, 0, 0, $4, $5)`,
-            [vendorId, productId, delta, machineId, `Direct restock: ${currentStock} -> ${stockQuantity}`]
+            [vendorId, productId, delta, machineId, `Direct restock: ${baseline} -> ${stockQuantity}`]
           );
         }
       } else if (delta < 0) {
@@ -992,7 +1020,7 @@ router.put('/machines/:machineId/inventory/:id', async (req, res) => {
           `INSERT INTO inventory_transactions
            (vendor_id, product_id, transaction_type, quantity, quantity_before, quantity_after, machine_id, notes)
            VALUES ($1, $2, 'sold_from_machine', $3, $4, $5, $6, $7)`,
-          [vendorId, productId, -sold, currentStock, stockQuantity, machineId, `Sold/consumed: ${currentStock} -> ${stockQuantity} (${sold} units)`]
+          [vendorId, productId, -sold, baseline, stockQuantity, machineId, `Sold/consumed: ${baseline} -> ${stockQuantity} (${sold} units)`]
         );
       }
 

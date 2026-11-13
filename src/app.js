@@ -447,6 +447,7 @@ app.get('/api/admin/email-scheduler-stats', verifyAdminToken, async (req, res) =
 const authRouter = require('./routes/auth');
 app.use('/api/auth', authRouter);
 app.use('/api/public', publicLimiter, require('./routes/public'));
+app.use('/api/vendor/sheet', require('./routes/sheet'));
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
