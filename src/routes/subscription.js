@@ -4,6 +4,7 @@ const { verifyToken } = require('../middleware/auth');
 const { query } = require('../config/database');
 const { sendEmail } = require('../services/emailService');
 const logger = require('../utils/logger');
+const { PAID_TIERS, DEFAULT_TIER, machineLimitFor } = require('../config/plans');
 const {
   TIER_CONFIG,
   createSubscriptionCheckout,
@@ -31,7 +32,7 @@ router.get('/status', verifyToken, async (req, res) => {
     }
 
     const user = result.rows[0];
-    const tierConfig = TIER_CONFIG[user.subscription_tier] || TIER_CONFIG.free;
+    const tierConfig = TIER_CONFIG[user.subscription_tier] || TIER_CONFIG[DEFAULT_TIER];
 
     // Count current machines
     const machineCount = await query(
@@ -51,7 +52,7 @@ router.get('/status', verifyToken, async (req, res) => {
         trialStart: user.trial_start,
         trialEnd: user.trial_end,
         nextBillingDate,
-        price: tierConfig.price ? `$${(tierConfig.price / 100).toFixed(0)}/mo` : 'Free',
+        price: tierConfig.priceCents ? `$${(tierConfig.priceCents / 100).toFixed(0)}/mo` : 'Free',
       },
     });
   } catch (error) {
@@ -63,7 +64,7 @@ router.get('/status', verifyToken, async (req, res) => {
 // ── POST /api/subscription/checkout ───────────────────────────────
 
 const checkoutSchema = Joi.object({
-  tier: Joi.string().valid('growth', 'pro', 'business').required(),
+  tier: Joi.string().valid(...PAID_TIERS).required(),
 });
 
 router.post('/checkout', verifyToken, async (req, res) => {
@@ -88,7 +89,7 @@ router.post('/checkout', verifyToken, async (req, res) => {
 // ── POST /api/subscription/change-plan ────────────────────────────
 
 const changePlanSchema = Joi.object({
-  tier: Joi.string().valid('growth', 'pro', 'business').required(),
+  tier: Joi.string().valid(...PAID_TIERS).required(),
 });
 
 router.post('/change-plan', verifyToken, async (req, res) => {
@@ -121,7 +122,7 @@ router.post('/change-plan', verifyToken, async (req, res) => {
 
     // Don't update local DB here — webhook is authoritative for tier changes
     // This prevents DB/Square state divergence if the change is rejected
-    const newLimit = TIER_CONFIG[value.tier]?.machineLimit || 1;
+    const newLimit = machineLimitFor(value.tier);
 
     res.json({
       success: true,

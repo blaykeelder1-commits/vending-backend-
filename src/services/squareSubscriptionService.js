@@ -21,13 +21,8 @@ function getClient() {
   return squareClient;
 }
 
-// Tier config — map tier names to Square plan variation IDs and machine limits
-const TIER_CONFIG = {
-  free: { machineLimit: 1, price: 0 },
-  growth: { machineLimit: 10, price: 1900, planVariationId: process.env.SQUARE_GROWTH_PLAN_ID },
-  pro: { machineLimit: 30, price: 4900, planVariationId: process.env.SQUARE_PRO_PLAN_ID },
-  business: { machineLimit: 100, price: 9900, planVariationId: process.env.SQUARE_BUSINESS_PLAN_ID },
-};
+// Tier config lives in config/plans.js (single source of truth)
+const { PLANS: TIER_CONFIG, DEFAULT_TIER, machineLimitFor } = require('../config/plans');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://iddisolutions.net';
 
@@ -198,7 +193,7 @@ async function handleWebhook(event) {
 
     // Determine tier from plan variation ID
     const planVariationId = subscription.plan_variation_id;
-    let newTier = 'free';
+    let newTier = DEFAULT_TIER;
     for (const [tier, config] of Object.entries(TIER_CONFIG)) {
       if (config.planVariationId === planVariationId) {
         newTier = tier;
@@ -208,11 +203,11 @@ async function handleWebhook(event) {
 
     // Map subscription status to our tier
     let effectiveTier = newTier;
-    let machineLimit = TIER_CONFIG[newTier]?.machineLimit || 1;
+    let machineLimit = machineLimitFor(newTier);
 
     if (status === 'CANCELED' || status === 'DEACTIVATED') {
-      effectiveTier = 'free';
-      machineLimit = 1;
+      effectiveTier = DEFAULT_TIER;
+      machineLimit = machineLimitFor(DEFAULT_TIER);
     }
 
     // Update user record
@@ -229,10 +224,10 @@ async function handleWebhook(event) {
 
     // Handle trial tracking
     if (subscription.start_date && !subscription.charged_through_date) {
-      // In trial period — calculate trial_end as start + 7 days
+      // In trial period — trial_end = start + the tier's trial days
       const trialStart = new Date(subscription.start_date);
       const trialEnd = new Date(trialStart);
-      trialEnd.setDate(trialEnd.getDate() + 7);
+      trialEnd.setDate(trialEnd.getDate() + (TIER_CONFIG[newTier]?.trialDays || 0));
       await query(
         `UPDATE users SET trial_start = $1, trial_end = $2 WHERE id = $3`,
         [trialStart, trialEnd, user.id]
@@ -241,7 +236,7 @@ async function handleWebhook(event) {
 
     // Log the event
     const eventTypeMap = {
-      ACTIVE: oldTier === 'free' ? 'upgrade' : (TIER_CONFIG[newTier]?.price > TIER_CONFIG[oldTier]?.price ? 'upgrade' : 'downgrade'),
+      ACTIVE: oldTier === 'free' ? 'upgrade' : (TIER_CONFIG[newTier]?.priceCents > TIER_CONFIG[oldTier]?.priceCents ? 'upgrade' : 'downgrade'),
       CANCELED: 'cancel',
       PAUSED: 'pause',
       PENDING: 'trial_start',

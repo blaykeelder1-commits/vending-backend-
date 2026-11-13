@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const Joi = require('joi');
 const { query, transaction } = require('../config/database');
+const { RULES } = require('../config/rules');
 const analyticsService = require('../services/analyticsService');
 const logger = require('../utils/logger');
 
@@ -71,7 +72,7 @@ router.post('/init-session', async (req, res) => {
     const fingerprintSource = `${req.ip}|${req.get('user-agent') || ''}|${screenResolution || ''}`;
     const deviceFingerprint = crypto.createHash('sha256').update(fingerprintSource).digest('hex').substring(0, 64);
     const sessionToken = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const expiresAt = new Date(Date.now() + RULES.customerSessionDays * 24 * 60 * 60 * 1000);
 
     const sessionResult = await query(
       `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent, device_fingerprint, screen_resolution, timezone)
@@ -289,7 +290,7 @@ router.post('/set-machine', async (req, res) => {
 
     // Create anonymous session
     const sessionToken = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const expiresAt = new Date(Date.now() + RULES.customerSessionDays * 24 * 60 * 60 * 1000);
 
     const sessionResult = await query(
       `INSERT INTO customer_sessions (machine_id, session_token, expires_at, qr_code_scanned, ip_address, user_agent, device_fingerprint, screen_resolution, timezone)

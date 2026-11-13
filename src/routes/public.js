@@ -41,6 +41,17 @@ const embedPollLimiter = rateLimit({
  * GET /api/public/blog
  * List published blog posts
  */
+/**
+ * GET /api/public/config
+ * Plans + business rules — the single source the frontend renders from.
+ */
+router.get('/config', (req, res) => {
+  const { publicPlans } = require('../config/plans');
+  const { publicRules } = require('../config/rules');
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ success: true, data: { plans: publicPlans(), rules: publicRules() } });
+});
+
 router.get('/blog', async (req, res) => {
   try {
     const result = await query(

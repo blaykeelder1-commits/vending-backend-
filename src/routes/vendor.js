@@ -5,6 +5,8 @@ const { protect, restrictTo } = require('../middleware/auth');
 const { generateQRCodeData, generateQRCodeDataURL } = require('../services/qrCodeService');
 const rankingService = require('../services/rankingService');
 const logger = require('../utils/logger');
+const { DEFAULT_TIER, machineLimitFor } = require('../config/plans');
+const { RULES, suggestReorder } = require('../config/rules');
 
 const router = express.Router();
 
@@ -178,11 +180,12 @@ router.post('/machines', async (req, res) => {
     // Check machine limit based on subscription tier
     const limitCheck = await query(
       `SELECT
-        (SELECT COUNT(*) FROM vending_machines WHERE vendor_id = $1) as machine_count,
-        COALESCE(u.machine_limit, 1) as machine_limit,
-        COALESCE(u.subscription_tier, 'free') as tier
+        (SELECT COUNT(*) FROM vending_machines
+           WHERE vendor_id = $1 AND (is_deleted = false OR is_deleted IS NULL)) as machine_count,
+        COALESCE(u.machine_limit, $2) as machine_limit,
+        COALESCE(u.subscription_tier, $3) as tier
       FROM users u WHERE u.id = $1`,
-      [req.user.id]
+      [req.user.id, machineLimitFor(DEFAULT_TIER), DEFAULT_TIER]
     );
     const { machine_count, machine_limit, tier } = limitCheck.rows[0];
     if (parseInt(machine_count) >= parseInt(machine_limit)) {
@@ -402,7 +405,7 @@ router.get('/machines/:id/qr', async (req, res) => {
       machine.qr_token = updateResult.rows[0].qr_token;
     }
 
-    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const baseUrl = process.env.FRONTEND_URL || 'https://iddisolutions.net';
     const qr_url = `${baseUrl}/customer/machine/${machine.qr_token}`;
 
     res.json({
@@ -716,7 +719,7 @@ router.get('/machines/:machineId/inventory', async (req, res) => {
 
     // Calculate stats including expiration info
     const expiringProducts = result.rows.filter(r =>
-      r.expiration_date && r.days_until_expiration <= 7
+      r.expiration_date && r.days_until_expiration <= RULES.expiry.warningDays
     );
 
     const stats = {
@@ -2166,8 +2169,9 @@ router.get('/shopping-list', async (req, res) => {
   try {
     const vendorId = req.user.id;
 
-    const windowDays = Math.min(Math.max(parseInt(req.query.window, 10) || 90, 1), 730);
-    const minApproval = Math.min(Math.max(parseInt(req.query.minApproval, 10) || 50, 0), 100);
+    const sl = RULES.shoppingList;
+    const windowDays = Math.min(Math.max(parseInt(req.query.window, 10) || sl.windowDays, 1), sl.maxWindowDays);
+    const minApproval = Math.min(Math.max(parseInt(req.query.minApproval, 10) || sl.minApprovalPct, 0), 100);
 
     const result = await query(
       `WITH reset AS (
@@ -2346,8 +2350,9 @@ router.post('/shopping-list/email', async (req, res) => {
       });
     }
 
-    const windowDays = Math.min(Math.max(parseInt(req.query.window, 10) || 90, 1), 730);
-    const minApproval = Math.min(Math.max(parseInt(req.query.minApproval, 10) || 50, 0), 100);
+    const sl = RULES.shoppingList;
+    const windowDays = Math.min(Math.max(parseInt(req.query.window, 10) || sl.windowDays, 1), sl.maxWindowDays);
+    const minApproval = Math.min(Math.max(parseInt(req.query.minApproval, 10) || sl.minApprovalPct, 0), 100);
 
     const listResult = await query(
       `WITH reset AS (
@@ -3567,7 +3572,7 @@ router.put('/suggestions/:id', async (req, res) => {
 router.get('/expiring-products', async (req, res) => {
   try {
     const vendorId = req.user.id;
-    const { days = 14 } = req.query;
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || RULES.expiry.listDays, 1), 365);
 
     const result = await query(
       `SELECT mp.id as inventory_id, mp.machine_id, mp.product_id,
@@ -3583,13 +3588,13 @@ router.get('/expiring-products', async (req, res) => {
          AND mp.expiration_date <= CURRENT_DATE + INTERVAL '1 day' * $2
          AND mp.current_stock > 0
        ORDER BY mp.expiration_date ASC`,
-      [vendorId, parseInt(days)]
+      [vendorId, days]
     );
 
     // Categorize by urgency
     const expired = result.rows.filter(r => r.days_until_expiration < 0);
-    const expiringSoon = result.rows.filter(r => r.days_until_expiration >= 0 && r.days_until_expiration <= 3);
-    const expiringLater = result.rows.filter(r => r.days_until_expiration > 3);
+    const expiringSoon = result.rows.filter(r => r.days_until_expiration >= 0 && r.days_until_expiration <= RULES.expiry.urgentDays);
+    const expiringLater = result.rows.filter(r => r.days_until_expiration > RULES.expiry.urgentDays);
 
     res.json({
       success: true,
@@ -3741,15 +3746,14 @@ router.get('/inventory', async (req, res) => {
     );
 
     // Calculate suggested reorder for each product
+    // Reorder math lives in config/rules.js (cover days × performance, rounded to a pack multiple)
     result.rows.forEach(item => {
-      const dailyRate = item.sold_30d > 0 ? item.sold_30d / 30 : 0;
-      // Suggest enough to cover ~2 weeks of sales, rounded up to nearest 5
-      const rawSuggestion = Math.ceil(dailyRate * 14);
-      const suggested = rawSuggestion > 0 ? Math.ceil(rawSuggestion / 5) * 5 : 0;
-      // Factor in performance: if performing well across machines, bump suggestion
-      const perfRatio = item.machines_stocked > 0 ? item.machines_performing / item.machines_stocked : 0;
-      const perfMultiplier = perfRatio >= 0.5 ? 1.2 : perfRatio > 0 ? 1.0 : 0.8;
-      item.suggested_reorder = suggested > 0 ? Math.ceil(suggested * perfMultiplier) : item.reorder_threshold;
+      item.suggested_reorder = suggestReorder({
+        soldInWindow: Number(item.sold_30d) || 0,
+        machinesStocked: item.machines_stocked,
+        machinesPerforming: item.machines_performing,
+        fallback: item.reorder_threshold,
+      });
     });
 
     const totalInField = result.rows.reduce((sum, r) => sum + r.in_field, 0);

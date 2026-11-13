@@ -3,6 +3,7 @@
 const express = require('express');
 const Joi = require('joi');
 const { query, transaction } = require('../config/database');
+const { RULES } = require('../config/rules');
 const { protect, restrictTo } = require('../middleware/auth');
 const logger = require('../utils/logger');
 
@@ -115,7 +116,7 @@ router.post('/discounts/machines/:machineId', protect, restrictTo('vendor'), asy
       [machineId]
     );
 
-    if (parseInt(activeCount.rows[0].count) >= 3) {
+    if (parseInt(activeCount.rows[0].count) >= RULES.maxActiveDiscountsPerMachine) {
       return res.status(400).json({
         success: false,
         message: 'Maximum 3 active discounts per machine. Deactivate an existing discount first.',
@@ -177,7 +178,7 @@ router.put('/discounts/:discountId', protect, restrictTo('vendor'), async (req, 
         [machineId, discountId]
       );
 
-      if (parseInt(activeCount.rows[0].count) >= 3) {
+      if (parseInt(activeCount.rows[0].count) >= RULES.maxActiveDiscountsPerMachine) {
         return res.status(400).json({
           success: false,
           message: 'Maximum 3 active discounts per machine. Deactivate an existing discount first.',

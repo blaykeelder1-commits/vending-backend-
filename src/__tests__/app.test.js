@@ -67,7 +67,8 @@ describe('App Basic Tests', () => {
 
   describe('Security Headers', () => {
     it('should include security headers from helmet', async () => {
-      const response = await request(app).get('/api/health');
+      // /api/health is mounted before all middleware by design; use a helmet-covered route.
+      const response = await request(app).get('/api/stats').set('Origin', 'http://localhost:3000');
 
       // Check for common security headers
       expect(response.headers).toHaveProperty('x-content-type-options');
@@ -84,6 +85,53 @@ describe('App Basic Tests', () => {
       // Should not reject the request
       expect(response.status).not.toBe(403);
     });
+  });
+});
+
+describe('Phase 0 security', () => {
+  const jwt = require('jsonwebtoken');
+  const sign = (email) => jwt.sign({ id: 999999, email, role: 'vendor' }, process.env.JWT_SECRET);
+
+  it('health exposes no DB fingerprint or machine count', async () => {
+    const response = await request(app).get('/api/health');
+    expect(response.body).not.toHaveProperty('database_fingerprint');
+    expect(response.body).not.toHaveProperty('machines_count');
+    expect(response.body).not.toHaveProperty('environment_variables');
+  });
+
+  it('admin rejects a plain vendor token', async () => {
+    process.env.ADMIN_EMAILS = 'admin@example.com';
+    const response = await request(app)
+      .get('/api/admin/email-scheduler-stats')
+      .set('Origin', 'http://localhost:3000')
+      .set('Authorization', `Bearer ${sign('vendor@example.com')}`);
+    expect(response.status).toBe(403);
+  });
+
+  it('admin rejects everyone when ADMIN_EMAILS is unset', async () => {
+    delete process.env.ADMIN_EMAILS;
+    const response = await request(app)
+      .get('/api/admin/email-scheduler-stats')
+      .set('Origin', 'http://localhost:3000')
+      .set('Authorization', `Bearer ${sign('admin@example.com')}`);
+    expect(response.status).toBe(403);
+  });
+
+  it('admin passes an allowlisted email (case-insensitive)', async () => {
+    process.env.ADMIN_EMAILS = 'Admin@Example.com';
+    const response = await request(app)
+      .get('/api/admin/email-scheduler-stats')
+      .set('Origin', 'http://localhost:3000')
+      .set('Authorization', `Bearer ${sign('admin@example.com')}`);
+    expect(response.status).not.toBe(403);
+    expect(response.status).not.toBe(401);
+  });
+
+  it('CORS no longer allows legacy vercel.app origins', async () => {
+    const response = await request(app)
+      .get('/api/stats')
+      .set('Origin', 'https://my-react-app-brown-three.vercel.app');
+    expect(response.headers['access-control-allow-origin']).toBeUndefined();
   });
 });
 

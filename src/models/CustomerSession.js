@@ -1,4 +1,5 @@
 const { query } = require('../config/database');
+const { RULES } = require('../config/rules');
 const { v4: uuidv4 } = require('uuid');
 
 class CustomerSession {
@@ -9,7 +10,7 @@ class CustomerSession {
    */
   static async create({ customerId = null, machineId, qrCodeScanned, ipAddress, userAgent }) {
     const sessionToken = uuidv4();
-    const expiresAt = new Date(Date.now() + (parseInt(process.env.SESSION_EXPIRY_HOURS) || 24) * 60 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + RULES.customerSessionDays * 24 * 60 * 60 * 1000);
 
     const result = await query(
       `INSERT INTO customer_sessions (customer_id, machine_id, session_token, qr_code_scanned, ip_address, user_agent, expires_at)

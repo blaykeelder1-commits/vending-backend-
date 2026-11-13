@@ -39,32 +39,13 @@ app.get('/api/health', async (req, res) => {
       timestamp: new Date().toISOString(),
     };
 
-    let dbFingerprint = null;
-    let machinesCount = 0;
-
     // Check database
     try {
       await pool.query('SELECT 1');
       checks.database.status = 'ok';
-
-      try {
-        const dbUrlParsed = new URL(process.env.DATABASE_URL || '');
-        const hostParts = dbUrlParsed.hostname.split('.');
-        const maskedHost = hostParts.length > 2
-          ? `${hostParts[0].substring(0, 3)}***.${hostParts[hostParts.length - 2]}.${hostParts[hostParts.length - 1]}`
-          : dbUrlParsed.hostname.substring(0, 10) + '***';
-        const dbName = dbUrlParsed.pathname.substring(1) || 'unknown';
-        const maskedDb = dbName.length > 4 ? dbName.substring(0, 3) + '***' : '***';
-        dbFingerprint = { host: maskedHost, database: maskedDb };
-      } catch (_) { /* URL parsing failed, skip fingerprint */ }
-
-      try {
-        const countResult = await pool.query('SELECT COUNT(*) as count FROM vending_machines');
-        machinesCount = parseInt(countResult.rows[0].count);
-      } catch (_) { /* table may not exist yet */ }
     } catch (error) {
       checks.database.status = 'error';
-      checks.database.message = error.message;
+      logger.error('Health check DB error', { error: error.message });
     }
 
     // Check Redis if configured
@@ -74,7 +55,7 @@ app.get('/api/health', async (req, res) => {
         checks.redis.status = 'ok';
       } catch (error) {
         checks.redis.status = 'error';
-        checks.redis.message = error.message;
+        logger.error('Health check Redis error', { error: error.message });
       }
     } else {
       checks.redis.status = 'not_configured';
@@ -82,22 +63,21 @@ app.get('/api/health', async (req, res) => {
 
     const requiredEnvVars = ['FRONTEND_URL', 'JWT_SECRET', 'DATABASE_URL'];
     const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-    const envStatus = missingEnvVars.length === 0 ? 'ok' : 'missing: ' + missingEnvVars.join(', ');
 
     const allOk = checks.database.status === 'ok';
+    // Public response is status-only: no DB fingerprint, counts or env detail.
+    // Detail lives behind /api/admin/db-info.
     res.status(allOk ? 200 : 503).json({
       status: allOk && missingEnvVars.length === 0 ? 'ok' : 'degraded',
       timestamp: checks.timestamp,
       uptime: process.uptime(),
-      database: checks.database,
-      database_fingerprint: dbFingerprint,
-      redis: checks.redis,
-      machines_count: machinesCount,
-      environment_variables: envStatus,
       environment: process.env.NODE_ENV || 'development',
+      database: checks.database.status,
+      redis: checks.redis.status,
     });
   } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message });
+    logger.error('Health check failed', { error: error.message });
+    res.status(500).json({ status: 'error' });
   }
 });
 
@@ -141,10 +121,9 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Allow project-scoped preview URLs on CF Pages (and legacy Vercel previews).
+    // Allow project-scoped preview URLs on CF Pages.
     const isAllowed = allowedOrigins.includes(origin) ||
-      (origin.endsWith('.pages.dev') && origin.includes('vending-front-end')) ||
-      (origin.endsWith('.vercel.app') && (origin.includes('my-react-app') || origin.includes('vending-front-end')));
+      (origin.endsWith('.pages.dev') && origin.includes('vending-front-end'));
 
     if (isAllowed) {
       callback(null, true);
@@ -306,8 +285,11 @@ const verifyAdminToken = async (req, res, next) => {
 
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'vendor') {
-      return res.status(403).json({ success: false, message: 'Vendor access required' });
+    // Admin = explicit email allowlist (ADMIN_EMAILS, comma-separated). Unset = no admins.
+    const adminEmails = (process.env.ADMIN_EMAILS || '')
+      .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+    if (!decoded.email || !adminEmails.includes(String(decoded.email).toLowerCase())) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
     }
 
     req.user = decoded;
@@ -328,6 +310,7 @@ const verifyAdminToken = async (req, res, next) => {
 app.use('/api/health', publicLimiter);
 app.use('/api/stats', publicLimiter);
 app.use('/api/auth/public', publicLimiter);
+app.use('/api/admin', loginLimiter);
 
 // Auth endpoints - strict IP-based rate limiting (brute force / spam protection)
 app.use('/api/auth/vendor/login', loginLimiter);
@@ -467,6 +450,8 @@ app.use('/api/public', publicLimiter, require('./routes/public'));
 app.use('/api/vendor', require('./routes/vendor'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/discounts/customer', customerLimiter);
+app.use('/api/discounts', authenticatedLimiter);
 app.use('/api', require('./routes/discounts'));
 app.use('/api/subscription', authenticatedLimiter, require('./routes/subscription'));
 

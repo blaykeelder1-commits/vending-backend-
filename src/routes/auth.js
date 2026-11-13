@@ -8,6 +8,7 @@ const CustomerSession = require('../models/CustomerSession');
 const RefreshToken = require('../models/RefreshToken');
 const { validateQRCodeData } = require('../services/qrCodeService');
 const { query, transaction } = require('../config/database');
+const { RULES } = require('../config/rules');
 const { scheduleOnboardingSequence, sendEmail } = require('../services/emailService');
 const logger = require('../utils/logger');
 
@@ -277,7 +278,7 @@ router.post('/vendor/login', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     // Generate refresh token
@@ -403,7 +404,7 @@ router.post('/vendor/google', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     // Generate refresh token
@@ -548,7 +549,7 @@ router.post('/vendor/google/callback', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     // Generate refresh token
@@ -667,7 +668,7 @@ router.post('/vendor/verify-email', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     // Generate refresh token
@@ -983,7 +984,7 @@ router.post('/customer/register', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     res.status(201).json({
@@ -1058,7 +1059,7 @@ router.post('/customer/login', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     // Generate refresh token
@@ -1350,7 +1351,7 @@ router.post('/refresh', async (req, res) => {
     const accessToken = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+      { expiresIn: RULES.accessTokenTtl }
     );
 
     // Generate new refresh token (rotation)
@@ -1368,7 +1369,7 @@ router.post('/refresh', async (req, res) => {
       data: {
         accessToken,
         refreshToken: newRefreshToken,
-        expiresIn: process.env.JWT_EXPIRES_IN || '1h',
+        expiresIn: RULES.accessTokenTtl,
         user: {
           id: user.id,
           email: user.email,

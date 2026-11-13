@@ -5,6 +5,7 @@
  */
 
 const { query } = require('../config/database');
+const { RULES } = require('../config/rules');
 const { sendEmail } = require('./emailService');
 const logger = require('../utils/logger');
 
@@ -224,7 +225,7 @@ async function scheduleSpoilageAlerts() {
         AND u.email_verified = true
         AND mi.current_stock > 0
         AND mi.expiration_date IS NOT NULL
-        AND mi.expiration_date <= NOW() + INTERVAL '7 days'
+        AND mi.expiration_date <= NOW() + INTERVAL '1 day' * ${Number(RULES.expiry.warningDays)}
         AND NOT EXISTS (
           SELECT 1 FROM email_log el
           WHERE el.user_id = u.id
@@ -254,7 +255,7 @@ async function scheduleSpoilageAlerts() {
           WHERE m.vendor_id = $1
             AND mi.current_stock > 0
             AND mi.expiration_date IS NOT NULL
-            AND mi.expiration_date <= NOW() + INTERVAL '7 days'
+            AND mi.expiration_date <= NOW() + INTERVAL '1 day' * ${Number(RULES.expiry.warningDays)}
           ORDER BY mi.expiration_date ASC
         `, [vendor.id]);
 
